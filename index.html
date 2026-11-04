@@ -5,6 +5,12 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <meta name="theme-color" content="#0e1013" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="谷道" />
+<meta name="format-detection" content="telephone=no" />
+<link rel="manifest" href="./manifest.json" />
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
+<link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
 <title>谷道 · 情绪与龙头</title>
 <style>
   :root{
@@ -121,6 +127,16 @@
   }
   .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
   .mini{font:inherit;background:none;border:none;color:var(--info);padding:2px 4px;font-size:12px}
+  /* ---------- 添加到主屏幕提示 ---------- */
+  .install{
+    position:fixed;left:12px;right:12px;z-index:40;display:none;align-items:center;gap:10px;
+    bottom:calc(64px + env(safe-area-inset-bottom) + 8px);
+    background:#232830;border:1px solid var(--line);border-radius:10px;
+    padding:9px 12px;font-size:12px;color:var(--mu);box-shadow:0 8px 24px rgba(0,0,0,.45);
+  }
+  .install.on{display:flex}
+  .install span{flex:1;line-height:1.4}
+  .install b{color:var(--tx);font-weight:500}
 </style>
 </head>
 <body>
@@ -174,6 +190,12 @@
 </nav>
 
 <div class="toast" id="toast"></div>
+
+<div class="install" id="installTip">
+  <span>加到主屏幕，下次<b>像 App 一样</b>全屏打开</span>
+  <button class="mini" id="installGo">怎么做</button>
+  <button class="mini" id="installNo" style="color:var(--dim)">关闭</button>
+</div>
 
 <script>
 "use strict";
@@ -249,12 +271,12 @@ const LS = {
 };
 
 let toastTimer = null;
-function toast(msg){
+function toast(msg, ms){
   const el = document.getElementById("toast");
   el.textContent = msg;
   el.classList.add("on");
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove("on"), 2200);
+  toastTimer = setTimeout(() => el.classList.remove("on"), ms || 2200);
 }
 
 /* ============================================================
@@ -1195,6 +1217,39 @@ document.addEventListener("visibilitychange", () => {
 refreshAll(true).catch(e => {
   document.getElementById("hdSub").innerHTML = '<span class="tag warn">加载失败：' + esc(e.message) + "</span>";
 });
+
+/* ============================================================
+   添加到主屏幕：仅在移动端、且尚未处于独立窗口时提示一次
+   ============================================================ */
+(function () {
+  const tip = document.getElementById("installTip");
+  if (!tip) return;
+  const standalone = (window.matchMedia && window.matchMedia("(display-mode: standalone)").matches)
+                     || window.navigator.standalone === true;
+  const isMobile = /Android|iPhone|iPad|iPod|HarmonyOS|Mobile/i.test(navigator.userAgent);
+  let off = false;
+  try { off = localStorage.getItem("gudao_install_tip") === "off"; } catch (_) {}
+  if (standalone || !isMobile || off) return;
+
+  tip.classList.add("on");
+  document.getElementById("installNo").onclick = () => {
+    tip.classList.remove("on");
+    try { localStorage.setItem("gudao_install_tip", "off"); } catch (_) {}
+  };
+  document.getElementById("installGo").onclick = () => {
+    const ios = /iPhone|iPad|iPod/i.test(navigator.userAgent);
+    toast(ios ? "点下方「分享 ⤴」→「添加到主屏幕」"
+              : "点浏览器右上「⋮」→「添加到主屏幕 / 安装应用」", 4200);
+  };
+})();
+
+/* Service Worker：让加桌面后是全屏 App，断网时也能打开外壳 */
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  window.addEventListener("load", () => {
+    navigator.serviceWorker.register("./sw.js").catch(() => {});
+  });
+}
+
 </script>
 </body>
 </html>
