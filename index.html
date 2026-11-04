@@ -1231,15 +1231,20 @@ refreshAll(true).catch(e => {
   try { off = localStorage.getItem("gudao_install_tip") === "off"; } catch (_) {}
   if (standalone || !isMobile || off) return;
 
-  tip.classList.add("on");
-  document.getElementById("installNo").onclick = () => {
+  const dismiss = () => {
     tip.classList.remove("on");
+    clearTimeout(autoTimer);
     try { localStorage.setItem("gudao_install_tip", "off"); } catch (_) {}
   };
+  // 只打扰一次：15 秒后自己收起来
+  const autoTimer = setTimeout(dismiss, 15000);
+
+  tip.classList.add("on");
+  document.getElementById("installNo").onclick = dismiss;
   document.getElementById("installGo").onclick = () => {
     const ios = /iPhone|iPad|iPod/i.test(navigator.userAgent);
     toast(ios ? "点下方「分享 ⤴」→「添加到主屏幕」"
-              : "点浏览器右上「⋮」→「添加到主屏幕 / 安装应用」", 4200);
+              : "点浏览器右上「⋮」→「添加到主屏幕 / 安装应用」", 5000);
   };
 })();
 
