@@ -126,7 +126,8 @@
     transition:.25s;z-index:50;max-width:80vw;text-align:center;
   }
   .toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
-  .mini{font:inherit;background:none;border:none;color:var(--info);padding:2px 4px;font-size:12px}
+  .mini{font:inherit;background:none;border:none;color:var(--info);padding:6px 9px;font-size:12px;
+    min-width:32px;min-height:28px}
   /* ---------- 添加到主屏幕提示 ---------- */
   .install{
     position:fixed;left:12px;right:12px;z-index:40;display:none;align-items:center;gap:10px;
@@ -137,6 +138,31 @@
   .install.on{display:flex}
   .install span{flex:1;line-height:1.4}
   .install b{color:var(--tx);font-weight:500}
+  /* ---------- 添加表单弹层 ---------- */
+  .sheet-mask{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:60;
+    opacity:0;pointer-events:none;transition:opacity .2s}
+  .sheet-mask.on{opacity:1;pointer-events:auto}
+  .sheet{position:fixed;left:0;right:0;bottom:0;z-index:61;background:var(--card);
+    border-top:1px solid var(--line);border-radius:16px 16px 0 0;
+    padding:14px 14px calc(14px + env(safe-area-inset-bottom));
+    transform:translateY(101%);transition:transform .24s cubic-bezier(.2,.7,.3,1);
+    max-height:88vh;overflow:auto;-webkit-overflow-scrolling:touch}
+  .sheet.on{transform:translateY(0)}
+  .sheet-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+  .sheet-h b{font-size:15px}
+  .sheet-h .x{background:none;border:none;color:var(--dim);font-size:17px;padding:2px 6px;line-height:1}
+  .fld{margin-bottom:11px}
+  .fld > label{display:block;font-size:11px;color:var(--dim);margin-bottom:5px}
+  .fld input{width:100%;background:var(--card2);border:1px solid var(--line);border-radius:9px;
+    color:var(--tx);font:inherit;font-size:15px;padding:10px 12px;outline:none;
+    font-variant-numeric:tabular-nums;transition:border-color .15s}
+  .fld input:focus{border-color:#3b5a7d}
+  .fld input::placeholder{color:var(--dim)}
+  .fld .hit{font-size:12px;margin-top:6px;min-height:17px;color:var(--ok);line-height:1.35}
+  .fld .hit.bad{color:var(--warn)}
+  .fld .hit b{font-size:14px;font-weight:600;color:var(--tx)}
+  .sheet-ok{width:100%;padding:12px;border-radius:10px;font-size:15px;margin-top:6px}
+  .sheet-ok:disabled{opacity:.4}
 </style>
 </head>
 <body>
@@ -259,9 +285,9 @@ function timeKey(v){
 }
 function symOf(code){
   code = String(code || "").trim();
+  if (/^(92|8|4)/.test(code)) return "bj" + code;   // 北交所（920 新代码段也在内）
   if (/^[569]/.test(code)) return "sh" + code;
   if (/^[013]/.test(code)) return "sz" + code;
-  if (/^[48]/.test(code)) return "bj" + code;
   return code;
 }
 
@@ -277,6 +303,121 @@ function toast(msg, ms){
   el.classList.add("on");
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => el.classList.remove("on"), ms || 2200);
+}
+
+/* ============================================================
+   底部表单弹层：输入 6 位代码自动识别名称
+   openSheet({ title, okText, fields:[{key,label,ph,value,num,maxlength,lookup}],
+               onSubmit(values, found) })
+   ============================================================ */
+let sheetCur = null;
+
+function closeSheet(){
+  if (!sheetCur) return;
+  const cur = sheetCur;
+  sheetCur = null;
+  document.body.style.overflow = "";
+  cur.mask.classList.remove("on");
+  cur.box.classList.remove("on");
+  setTimeout(() => { cur.mask.remove(); cur.box.remove(); }, 260);
+}
+
+function openSheet(opt){
+  closeSheet();
+  document.body.style.overflow = "hidden";   // 弹层打开时锁住背景滚动
+  const mask = document.createElement("div");
+  mask.className = "sheet-mask";
+  const box = document.createElement("div");
+  box.className = "sheet";
+
+  box.innerHTML =
+    '<div class="sheet-h"><b>' + esc(opt.title) + '</b><button class="x" type="button">✕</button></div>' +
+    (opt.fields || []).map(function (f) {
+      return '<div class="fld" data-k="' + esc(f.key) + '">' +
+        "<label>" + esc(f.label) + "</label>" +
+        '<input type="' + (f.type || "text") + '"' +
+          ' inputmode="' + (f.num ? "decimal" : "text") + '"' +
+          ' autocomplete="off" autocorrect="off" spellcheck="false"' +
+          (f.maxlength ? ' maxlength="' + f.maxlength + '"' : "") +
+          ' placeholder="' + esc(f.ph || "") + '"' +
+          ' value="' + esc(f.value == null ? "" : String(f.value)) + '" />' +
+        '<div class="hit"></div></div>';
+    }).join("") +
+    '<button class="primary sheet-ok" type="button">' + esc(opt.okText || "确定") + "</button>";
+
+  document.body.appendChild(mask);
+  document.body.appendChild(box);
+  sheetCur = { mask: mask, box: box };
+  requestAnimationFrame(function () { mask.classList.add("on"); box.classList.add("on"); });
+
+  function q(k){ return box.querySelector('.fld[data-k="' + k + '"] input'); }
+  function hitOf(k){ return box.querySelector('.fld[data-k="' + k + '"] .hit'); }
+  const okBtn = box.querySelector(".sheet-ok");
+
+  let found = null;
+  const lookupField = (opt.fields || []).filter(function (f) { return f.lookup; })[0];
+
+  if (lookupField){
+    const input = q(lookupField.key);
+    const hit = hitOf(lookupField.key);
+    okBtn.disabled = true;
+
+    let timer = null, seq = 0;
+    async function run(){
+      const code = input.value.replace(/\D/g, "").slice(0, 6);
+      if (input.value !== code) input.value = code;
+      const my = ++seq;
+      found = null;
+      okBtn.disabled = true;
+      if (code.length !== 6){ hit.className = "hit"; hit.textContent = ""; return; }
+
+      hit.className = "hit";
+      hit.textContent = "识别中…";
+      try{
+        const r = await lookupName(code);
+        if (my !== seq) return;                       // 期间又改了输入，丢弃旧结果
+        if (!r){
+          hit.className = "hit bad";
+          hit.textContent = "没查到 " + code + "，确认代码是否正确";
+          return;
+        }
+        found = r;
+        hit.className = "hit";
+        hit.innerHTML = "<b>" + esc(r.name) + "</b> · " + esc(code) +
+          (r.price != null ? '　<span class="dim">现价 ' + fixed(r.price, r.price < 10 ? 3 : 2) + "</span>" : "");
+        okBtn.disabled = false;
+      }catch(e){
+        if (my !== seq) return;
+        hit.className = "hit bad";
+        hit.textContent = "名称查询失败：" + (e.message || "网络异常");
+      }
+    }
+
+    input.addEventListener("input", function () {
+      clearTimeout(timer);
+      timer = setTimeout(run, 280);
+    });
+    input.addEventListener("change", run);
+    if (input.value) run();
+  } else {
+    okBtn.disabled = false;
+  }
+
+  mask.addEventListener("click", closeSheet);
+  box.querySelector(".x").addEventListener("click", closeSheet);
+  box.addEventListener("keydown", function (e) { if (e.key === "Enter") okBtn.click(); });
+
+  okBtn.addEventListener("click", function () {
+    const values = {};
+    (opt.fields || []).forEach(function (f) { values[f.key] = (q(f.key).value || "").trim(); });
+    if (lookupField && !found) return toast("请先输入能识别的 6 位代码");
+    opt.onSubmit(values, found);
+  });
+
+  setTimeout(function () {
+    const el = lookupField ? q(lookupField.key) : null;
+    if (el) el.focus();
+  }, 280);
 }
 
 /* ============================================================
@@ -385,9 +526,38 @@ async function fetchQuotes(codes){
       const prev = Number(f[4]);
       pct = prev ? (price / prev - 1) * 100 : null;
     }
-    out[code] = { price, pct };
+    out[code] = { price, pct, name: (f[1] || "").trim() || null };
   });
   return out;
+}
+
+/* 6 位代码 → 名称。按规则定市场，取不到再试另外两个市场。
+   返回 { code, sym, name, price } 或 null。 */
+async function lookupName(code){
+  code = String(code || "").trim();
+  if (!/^\d{6}$/.test(code)) return null;
+  const first = symOf(code);
+  const order = [first];
+  ["sh", "sz", "bj"].forEach(p => { const s = p + code; if (order.indexOf(s) < 0) order.push(s); });
+
+  const txt = await req(EP.quote(order.join(",")), { as: "text", tries: 2, timeout: 9000 });
+  const hits = {};
+  txt.split(";").forEach(line => {
+    if (line.indexOf("=") < 0) return;
+    const sym = line.slice(0, line.indexOf("=")).trim().replace(/^v_/, "");
+    const body = line.slice(line.indexOf("=") + 1).trim().replace(/^"|"$/g, "");
+    const f = body.split("~");
+    if (f.length < 4) return;
+    const nm = (f[1] || "").trim();
+    if (!nm || nm === "未知") return;
+    if (f[2] !== code) return;                       // 返回的代码必须对得上
+    hits[sym] = { name: nm, price: Number(f[3]) || null };
+  });
+  for (let i = 0; i < order.length; i++){
+    const h = hits[order[i]];
+    if (h) return { code, sym: order[i], name: h.name, price: h.price };
+  }
+  return null;
 }
 
 /* 指数行情单独取：必须按 sh000001 这种完整代码做键。
@@ -734,6 +904,24 @@ async function refreshAll(silent){
 
   const [quotes] = await Promise.all([quoteTask, poolTask, idxTask]);
 
+  /* 老记录里只存了代码的，用行情返回的名称补上，并写回本地（只补一次） */
+  {
+    let dirty = false;
+    const fill = (arr, save) => {
+      let hit = false;
+      (arr || []).forEach(x => {
+        const q = quotes[String(x.code || "").trim()];
+        const nm = q && q.name;
+        if (nm && (!x.name || x.name === x.code)) { x.name = nm; hit = true; }
+      });
+      if (hit) { dirty = true; save(arr); }
+    };
+    fill(pf.holdings, a => { pf.holdings = a; savePortfolio(pf); });
+    fill(etfW, saveEtfWatch);
+    fill(watchW, saveWatch);
+    if (dirty) { /* 已写回，下次打开就是带名称的 */ }
+  }
+
   /* --- 持仓 --- */
   {
     const total = pf.total;
@@ -1027,7 +1215,9 @@ function renderEtf(){
     (rows.length ? '<div class="list">' + rows.map(r => {
       const sCls = r.sig === "加仓" ? "up" : r.sig === "减仓" ? "dn" : r.sig === "观望" ? "" : "info";
       return '<div class="li">' +
-        '<div class="li-n"><b>' + esc(r.name) + ' <span class="tag ' + sCls + '">' + esc(r.sig) + "</span></b>" +
+        '<div class="li-n"><b>' + esc(r.name) + "</b>" +
+          '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span>" +
+          ' <span class="tag ' + sCls + '">' + esc(r.sig) + "</span>" +
           "<i>" + esc(r.why) + "</i></div>" +
         '<div class="li-v">' + fixed(r.price, 3) +
           '<div class="xs ' + clsOf(r.pct) + '">' + signed(r.pct, 2) + "%</div></div>" +
@@ -1042,14 +1232,22 @@ function renderEtf(){
 
   const btn = document.getElementById("btnAddEtf");
   if (btn) btn.onclick = () => {
-    const code = (prompt("ETF 代码（6 位）") || "").trim();
-    if (!/^\d{6}$/.test(code)) return toast("代码需要 6 位数字");
-    const name = (prompt("名称（可留空，自动用代码）") || "").trim() || code;
-    const list = loadEtfWatch();
-    if (list.some(x => x.code === code)) return toast("已经添加过了");
-    list.push({ code, name });
-    saveEtfWatch(list);
-    refreshAll(true);
+    openSheet({
+      title: "添加自选 ETF",
+      okText: "添加",
+      fields: [
+        { key: "code", label: "代码（6 位，自动识别名称）", ph: "510300", num: true, maxlength: 6, lookup: true },
+      ],
+      onSubmit: (v, found) => {
+        const list = loadEtfWatch();
+        if (list.some(x => String(x.code) === found.code)) return toast("已经添加过了");
+        list.push({ code: found.code, name: found.name });
+        saveEtfWatch(list);
+        closeSheet();
+        toast("已添加 " + found.name);
+        refreshAll(true);
+      },
+    });
   };
   document.querySelectorAll("[data-del-etf]").forEach(b => {
     b.onclick = () => {
@@ -1074,7 +1272,9 @@ function renderPos(){
     (pf.holdings.length ? '<div class="list">' + pf.holdings.map(h => {
       const pCls = h.pnl == null ? "" : h.pnl > 0 ? "up" : "dn";
       return '<div class="li">' +
-        '<div class="li-n"><b>' + esc(h.name) + "</b><i>成本 " + fixed(h.cost, 2) +
+        '<div class="li-n"><b>' + esc(h.name) + "</b>" +
+          '<span class="xs dim" style="margin-left:6px">' + esc(h.code) + "</span>" +
+          "<i>成本 " + fixed(h.cost, 2) +
           " · " + (h.shares || 0) + " 股" + (h.weight != null ? " · 占 " + fixed(h.weight, 1) + "%" : "") + "</i></div>" +
         '<div class="li-v">' + fixed(h.price, 2) +
           '<div class="xs ' + pCls + '">' + (h.pnl == null ? "—" : signed(h.pnl, 2) + "%") + "</div></div>" +
@@ -1103,17 +1303,28 @@ function renderPos(){
     refreshAll(true);
   };
   document.getElementById("btnAddPos").onclick = () => {
-    const code = (prompt("股票代码（6 位）") || "").trim();
-    if (!/^\d{6}$/.test(code)) return toast("代码需要 6 位数字");
-    const name = (prompt("名称") || "").trim() || code;
-    const cost = Number(prompt("成本价", ""));
-    if (!isFinite(cost) || cost <= 0) return toast("成本价不对");
-    const shares = Number(prompt("股数", "0"));
-    if (!isFinite(shares) || shares < 0) return toast("股数不对");
-    const p = loadPortfolio();
-    p.holdings.push({ code, name, cost, shares });
-    savePortfolio(p);
-    refreshAll(true);
+    openSheet({
+      title: "添加持仓",
+      okText: "添加",
+      fields: [
+        { key: "code", label: "代码（6 位，自动识别名称）", ph: "600000", num: true, maxlength: 6, lookup: true },
+        { key: "cost", label: "成本价（元）", ph: "8.50", num: true },
+        { key: "shares", label: "股数", ph: "1000", num: true },
+      ],
+      onSubmit: (v, found) => {
+        const cost = Number(v.cost);
+        if (!isFinite(cost) || cost <= 0) return toast("成本价没填对");
+        const shares = Number(v.shares);
+        if (!isFinite(shares) || shares <= 0) return toast("股数没填对");
+        const p = loadPortfolio();
+        if (p.holdings.some(h => String(h.code) === found.code)) return toast("已经有这只了");
+        p.holdings.push({ code: found.code, name: found.name, cost, shares });
+        savePortfolio(p);
+        closeSheet();
+        toast("已添加 " + found.name);
+        refreshAll(true);
+      },
+    });
   };
   document.querySelectorAll("[data-del-pos]").forEach(b => {
     b.onclick = () => {
@@ -1156,7 +1367,8 @@ function renderWatch(){
       if (r.price != null && r.stop && r.price <= r.stop) flag = '<span class="tag up">破止损</span>';
       else if (r.price != null && r.buy && r.price <= r.buy) flag = '<span class="tag ok">到买价</span>';
       return '<div class="li">' +
-        '<div class="li-n"><b>' + esc(r.name) + " " + flag + "</b>" +
+        '<div class="li-n"><b>' + esc(r.name) + "</b>" +
+          '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span> " + flag +
           "<i>买 " + (r.buy || "-") + " · 损 " + (r.stop || "-") +
           (r.vsStop != null ? " · 距止损 " + signed(r.vsStop, 1) + "%" : "") + "</i></div>" +
         '<div class="li-v">' + fixed(r.price, 2) +
@@ -1171,15 +1383,29 @@ function renderWatch(){
     '<div style="margin-top:10px"><button id="btnAddWatch" class="primary">+ 添加</button></div>';
 
   document.getElementById("btnAddWatch").onclick = () => {
-    const code = (prompt("股票代码（6 位）") || "").trim();
-    if (!/^\d{6}$/.test(code)) return toast("代码需要 6 位数字");
-    const name = (prompt("名称") || "").trim() || code;
-    const buy = Number(prompt("计划买价（可留空）", ""));
-    const stop = Number(prompt("止损价（可留空）", ""));
-    const list = loadWatch();
-    list.push({ code, name, buy: isFinite(buy) && buy > 0 ? buy : null, stop: isFinite(stop) && stop > 0 ? stop : null });
-    saveWatch(list);
-    refreshAll(true);
+    openSheet({
+      title: "添加盯盘股",
+      okText: "添加",
+      fields: [
+        { key: "code", label: "代码（6 位，自动识别名称）", ph: "600000", num: true, maxlength: 6, lookup: true },
+        { key: "buy", label: "计划买价（可留空）", ph: "跌到这个价提醒", num: true },
+        { key: "stop", label: "止损价（可留空）", ph: "跌破这个价提醒", num: true },
+      ],
+      onSubmit: (v, found) => {
+        const buy = Number(v.buy), stop = Number(v.stop);
+        const list = loadWatch();
+        if (list.some(x => String(x.code) === found.code)) return toast("已经在盯了");
+        list.push({
+          code: found.code, name: found.name,
+          buy: isFinite(buy) && buy > 0 ? buy : null,
+          stop: isFinite(stop) && stop > 0 ? stop : null,
+        });
+        saveWatch(list);
+        closeSheet();
+        toast("已添加 " + found.name);
+        refreshAll(true);
+      },
+    });
   };
   document.querySelectorAll("[data-del-watch]").forEach(b => {
     b.onclick = () => {
