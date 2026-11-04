@@ -877,18 +877,22 @@ function renderAdvice(){
   const low = adv.low, high = adv.high, cur = adv.curPct;
   const total = ST.live ? ST.live.total : 0;
   const actCls = adv.action === "减仓" ? "dn" : adv.action === "加仓" ? "up" : "";
+  const pending = adv.action === "待录入";   // 没填总资金：不假装 0% 空仓
   document.getElementById("posCard").innerHTML =
     '<div class="card-h"><span class="card-t">仓位建议</span>' +
       '<span class="tag ' + (adv.action === "减仓" ? "dn" : adv.action === "加仓" ? "up" : "") + '">' +
       esc(adv.action) + (adv.amount ? " " + adv.amount + "%" : "") + "</span></div>" +
     '<div class="row sp" style="align-items:flex-end">' +
-      '<div><span style="font-size:24px;font-weight:600" class="' + actCls + '">' + fixed(cur, 1) + "</span>" +
-        '<span class="sm muted">% · ' + esc(adv.level) + "</span></div>" +
+      (pending
+        ? '<div><span style="font-size:24px;font-weight:600" class="dim">—</span>' +
+          '<span class="sm muted"> 未填总资金</span></div>'
+        : '<div><span style="font-size:24px;font-weight:600" class="' + actCls + '">' + fixed(cur, 1) + "</span>" +
+          '<span class="sm muted">% · ' + esc(adv.level) + "</span></div>") +
       '<div class="sm muted">目标 ' + esc(adv.rangeTxt) + "</div>" +
     "</div>" +
     '<div class="bar">' +
       '<div class="rg" style="left:' + low + "%;width:" + Math.max(0, high - low) + '%"></div>' +
-      '<div class="cur" style="left:' + Math.max(0, Math.min(100, cur)) + '%"></div>' +
+      (pending ? "" : '<div class="cur" style="left:' + Math.max(0, Math.min(100, cur)) + '%"></div>') +
     "</div>" +
     '<div class="bar-lb"><span>0%</span><span>目标 ' + low + "-" + high + '%</span><span>100%</span></div>' +
     '<div class="sm muted" style="margin-top:8px">' + esc(adv.reason) + "</div>" +
