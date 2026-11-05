@@ -1,7 +1,7 @@
 {
-  "name": "谷道 · 情绪与龙头",
-  "short_name": "谷道",
-  "description": "A股情绪周期与龙头梯队盯盘，涨停跌停炸板、指数、自选ETF、持仓建议",
+  "name": "观潮 · 情绪与龙头",
+  "short_name": "观潮",
+  "description": "A股情绪周期与龙头梯队盯盘：涨停跌停炸板、指数、自选ETF、场外基金盘中估值与持仓建议",
   "lang": "zh-CN",
   "dir": "ltr",
   "start_url": "./index.html",

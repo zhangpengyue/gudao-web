@@ -6,12 +6,12 @@
 <meta name="theme-color" content="#0e1013" />
 <meta name="apple-mobile-web-app-capable" content="yes" />
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-<meta name="apple-mobile-web-app-title" content="谷道" />
+<meta name="apple-mobile-web-app-title" content="观潮" />
 <meta name="format-detection" content="telephone=no" />
 <link rel="manifest" href="./manifest.json" />
 <link rel="apple-touch-icon" href="./icons/apple-touch-icon.png" />
 <link rel="icon" type="image/png" sizes="32x32" href="./icons/favicon-32.png" />
-<title>谷道 · 情绪与龙头</title>
+<title>观潮 · 情绪与龙头</title>
 <style>
   :root{
     --bg:#0e1013; --card:#171a20; --card2:#1d212a; --line:#272c36;
@@ -184,7 +184,7 @@
 
 <header>
   <div class="hd-top">
-    <div class="brand">谷道<span>情绪与龙头</span></div>
+    <div class="brand">观潮<span>情绪与龙头</span></div>
     <button id="btnRefresh">刷新</button>
   </div>
   <div class="hd-sub" id="hdSub"><span>正在加载…</span></div>
@@ -245,7 +245,7 @@
    0. 配置：将来加代理 / 换自建服务，只改 PROXY 一行
    ============================================================ */
 const PROXY = "";   // 例：'https://xxx.workers.dev/?u='  留空则浏览器直连数据源
-const VER = "v2026.11.05-1350";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
+const VER = "v2026.11.05-1404";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
 function via(url){ return PROXY ? PROXY + encodeURIComponent(url) : url; }
 
 /* 设备号：东财接口按 deviceid 做频控。全站共用一个 "1" 很容易被别的

@@ -1,7 +1,7 @@
-/* 谷道 · 应用外壳缓存
+/* 观潮 · 应用外壳缓存
    策略：同源资源 network-first（保证每次拿到最新版页面），断网时回退缓存；
         跨域行情接口一律不拦截，永远走真实网络，避免读到过期报价。 */
-const CACHE = "gudao-shell-v6";
+const CACHE = "guanchao-shell-v7";
 const SHELL = ["./", "./index.html", "./manifest.json"];
 
 self.addEventListener("install", (e) => {
