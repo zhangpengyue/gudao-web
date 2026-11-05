@@ -245,8 +245,21 @@
    0. 配置：将来加代理 / 换自建服务，只改 PROXY 一行
    ============================================================ */
 const PROXY = "";   // 例：'https://xxx.workers.dev/?u='  留空则浏览器直连数据源
-const VER = "v2026.11.05-1205";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
+const VER = "v2026.11.05-1350";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
 function via(url){ return PROXY ? PROXY + encodeURIComponent(url) : url; }
+
+/* 设备号：东财接口按 deviceid 做频控。全站共用一个 "1" 很容易被别的
+   客户端打满配额，这里给每台设备生成一个固定随机串（存 localStorage）。 */
+const DEVID = (function(){
+  try{
+    let v = localStorage.getItem("gd_did");
+    if (!v){
+      v = Math.random().toString(36).slice(2, 12) + Math.random().toString(36).slice(2, 8);
+      localStorage.setItem("gd_did", v);
+    }
+    return v;
+  }catch(e){ return "1"; }
+})();
 
 const UT = "7eea3edcaed734bea9cbfc24409ed989";
 const EP = {
@@ -266,11 +279,11 @@ const EP = {
              + "&product=EFund&Version=1&deviceid=1&_=" + Date.now(),
   /* 场外基金季报持仓：前十大重仓股 + 各自占净值比，用于盘中估值 */
   fundHold: code => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE="
-             + code + "&deviceid=1&plat=Android&product=EFund&version=1&appType=ttjj"
+             + code + "&deviceid=" + DEVID + "&plat=Android&product=EFund&version=1&appType=ttjj"
              + "&_=" + Date.now(),
   /* 场外基金资产配置：股票/债券/现金各占多少，用于把重仓股涨幅放大到整只基金 */
   fundAlloc: code => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNAssetAllocationNew?FCODE="
-             + code + "&deviceid=1&plat=Android&product=EFund&version=1&appType=ttjj"
+             + code + "&deviceid=" + DEVID + "&plat=Android&product=EFund&version=1&appType=ttjj"
              + "&_=" + Date.now(),
 };
 
@@ -652,7 +665,8 @@ function holdFromPzd(code){
   const run = pzdLock.then(() => new Promise((resolve, reject) => {
     const el = document.createElement("script");
     let settled = false;
-    const tid = setTimeout(() => { done(); reject(new Error("备用源超时")); }, 15000);
+    /* 这个文件 300~600KB，手机弱网十几秒很正常，超时要给够，否则永远等不到 */
+    const tid = setTimeout(() => { done(); reject(new Error("备用源超时")); }, 30000);
     function done(){
       if (settled) return;
       settled = true;
@@ -694,29 +708,45 @@ function holdFromPzd(code){
    桌面 Chrome 一律返回 61136403「网络繁忙」。
    主源不通时降级到 pingzhongdata（script 加载，不限 UA），等权近似。
    返回 { date, rows:[{code,name,w}], src:"api"|"pzd", equal, pos } */
+let holdApiGated = false;      // 本次打开主源已经被风控过，后面几只别再白试
 async function fetchFundHold(code){
+  let apiErr = "";
+  if (!holdApiGated){
+    try{
+      return await memo("fh_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
+        const j = await req(EP.fundHold(code), { tries: 2, timeout: 12000 });
+        const d = (j && j.Datas) || {};
+        const rows = (d.fundStocks || []).map(it => ({
+          code: String(it.GPDM || "").trim(),
+          name: it.GPJC || "",
+          w: Number(it.JZBL),
+        })).filter(x => /^\d{5,6}$/.test(x.code) && isFinite(x.w) && x.w > 0);   // 5 位是港股
+        if (!rows.length) throw new Error(j && j.ErrCode ? "接口 " + j.ErrCode : "季报持仓为空");
+        return { date: d.FSRQ || (j && j.Expansion) || "", rows, src: "api" };
+      }, true, true);
+    }catch(e){
+      apiErr = (e && e.message) || "请求失败";
+      if (/61136403|网络繁忙/.test(apiErr)) holdApiGated = true;
+    }
+  }else{
+    apiErr = "接口 61136403（按 UA 风控）";
+  }
   try{
-    return await memo("fh_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
-      const j = await req(EP.fundHold(code), { tries: 2, timeout: 12000 });
-      const d = (j && j.Datas) || {};
-      const rows = (d.fundStocks || []).map(it => ({
-        code: String(it.GPDM || "").trim(),
-        name: it.GPJC || "",
-        w: Number(it.JZBL),
-      })).filter(x => /^\d{6}$/.test(x.code) && isFinite(x.w) && x.w > 0);
-      if (!rows.length) throw new Error("季报持仓为空");
-      return { date: d.FSRQ || (j && j.Expansion) || "", rows, src: "api" };
-    }, true, true);
-  }catch(e){
-    /* 降级结果只放内存、不写 localStorage：主接口一恢复就该换回精确权重 */
-    return await memo("fhp_" + code, 30 * 60 * 1000, async () => {
+    /* 备用源结果按天走缓存：一个季度才变一次，没必要每次打开都下几百 KB */
+    return await memo("fhp_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
       const p = await holdFromPzd(code);
       const w = 100 / p.codes.length;
       return {
         date: "", src: "pzd", equal: true, pos: p.pos,
         rows: p.codes.map(c => ({ code: c, name: "", w })),
       };
-    }, false, false);
+    }, true, true);
+  }catch(e2){
+    const m2 = String((e2 && e2.message) || "失败").replace(/^备用源/, "");
+    /* 两个源都说「没有持仓」，那就是债基/货基这类本来就没有股票的，
+       不要报成故障，界面上会显示成「没有盘中估值」 */
+    if (/持仓为空|没有持仓/.test(apiErr + " " + m2)) throw new Error("季报持仓为空");
+    throw new Error("主源 " + apiErr + "；备用源 " + m2);
   }
 }
 
@@ -1618,7 +1648,7 @@ function estDiag(r){
   }
   /* 东财的季报持仓接口只对手机 UA 放行，电脑浏览器会被风控成「网络繁忙」 */
   if (!/Mobile|Android|iPhone|iPad|iPod|HarmonyOS|MicroMessenger/i.test(navigator.userAgent))
-    lines.push("当前是电脑浏览器：这个接口只对手机 UA 放行，用手机打开就能算出来");
+    lines.push("电脑浏览器：主接口只放行手机 UA，已经自动改用备用源；两个都没拿到，说明本机网络把 fund.eastmoney.com 也拦了");
   const head = r.estErr === "季报持仓为空"
     ? "没有盘中估值：季报里没有股票持仓（债基/货基）"
     : "估值暂缺：" + r.estErr;
@@ -1634,7 +1664,7 @@ function estPanel(r){
   const items = e.items.map(it =>
     '<div class="er">' +
       '<span class="ern">' + esc(it.name || it.code) + "<i>" + esc(it.code) + "</i></span>" +
-      '<span class="erw">' + (e.equal ? "—" : fixed(it.w, 1) + "%") + "</span>" +
+      '<span class="erw">' + (e.equal ? "等权" : fixed(it.w, 1) + "%") + "</span>" +
       '<span class="erp ' + clsOf(it.pct) + '">' + (it.pct == null ? "—" : signed(it.pct, 2) + "%") + "</span>" +
       '<span class="erc ' + clsOf(it.contrib) + '">' + (it.contrib == null ? "—" : signed(it.contrib, 2)) + "</span>" +
     "</div>").join("");
