@@ -245,7 +245,7 @@
    0. 配置：将来加代理 / 换自建服务，只改 PROXY 一行
    ============================================================ */
 const PROXY = "";   // 例：'https://xxx.workers.dev/?u='  留空则浏览器直连数据源
-const VER = "v2026.11.05-1155";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
+const VER = "v2026.11.05-1205";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
 function via(url){ return PROXY ? PROXY + encodeURIComponent(url) : url; }
 
 const UT = "7eea3edcaed734bea9cbfc24409ed989";
@@ -317,6 +317,7 @@ function timeKey(v){
 }
 function symOf(code){
   code = String(code || "").trim();
+  if (/^\d{5}$/.test(code)) return "hk" + code;     // 港股 5 位，腾讯行情用 hk 前缀
   if (/^(92|8|4)/.test(code)) return "bj" + code;   // 北交所（920 新代码段也在内）
   if (/^[569]/.test(code)) return "sh" + code;
   if (/^[013]/.test(code)) return "sz" + code;
@@ -574,7 +575,9 @@ async function fetchQuotes(codes){
       pct = prev ? (price / prev - 1) * 100 : null;
     }
     out[code] = { price, pct, name: (f[1] || "").trim() || null,
-                  ts: String(f[30] || "").slice(0, 8) };   // 行情日期，用于判断是不是当天的价
+                  // 行情日期，用于判断是不是当天的价。A 股是 20261105114340，
+                  // 港股是 2026/11/05 11:43:40，去掉非数字再截前 8 位就统一了
+                  ts: String(f[30] || "").replace(/\D/g, "").slice(0, 8) };
   });
   return out;
 }
@@ -618,20 +621,103 @@ async function fetchFundNav(code, n){
   }, true, true);
 }
 
-/* 季报持仓：只取前十大重仓股。一个季度才变一次，缓存 6 小时。
-   返回 { date: 报告期, rows: [{ code, name, w }] }，w 是「占基金净值比」的百分数 */
+/* 限并发：自选一多，一次刷新会同时打出几十个请求，
+   东财那边直接就回 61136403「网络繁忙」了，手机弱网也扛不住 */
+async function mapLimit(items, limit, fn){
+  const out = new Array(items.length);
+  let next = 0;
+  const workers = [];
+  const n = Math.max(1, Math.min(limit || 1, items.length));
+  for (let w = 0; w < n; w++){
+    workers.push((async () => {
+      while (true){
+        const k = next++;
+        if (k >= items.length) return;
+        out[k] = await fn(items[k], k);
+      }
+    })());
+  }
+  await Promise.all(workers);
+  return out;
+}
+
+/* 备用持仓源：fund.eastmoney.com/pingzhongdata/<code>.js
+   这个文件本来就是给 <script> 直接加载的，所以没有跨域限制，也不像 fundmobapi
+   那样按 UA 白名单放行——桌面浏览器照样能拿到。
+   里面只有 stockCodes（前十大重仓股代码）和 Data_fundSharesPositions（股票仓位），
+   没有各自权重，只能等权近似；主接口不通时用它兜底，至少能看出方向。 */
+let pzdLock = Promise.resolve();
+function holdFromPzd(code){
+  /* 这几个都是全局 var，同时加载会互相覆盖，必须一个一个来 */
+  const run = pzdLock.then(() => new Promise((resolve, reject) => {
+    const el = document.createElement("script");
+    let settled = false;
+    const tid = setTimeout(() => { done(); reject(new Error("备用源超时")); }, 15000);
+    function done(){
+      if (settled) return;
+      settled = true;
+      clearTimeout(tid);
+      try{ el.remove(); }catch(e){}
+      ["stockCodes", "stockCodesNew", "Data_fundSharesPositions", "fS_name"].forEach(k => {
+        try{ window[k] = undefined; }catch(e){}
+      });
+    }
+    el.onload = () => {
+      /* stockCodesNew 是「市场.代码」：1=沪 0=深 116=港股。
+         不能用 stockCodes——那个是「代码+市场位」拼在一起，港股会串位。 */
+      const list = Array.isArray(window.stockCodesNew) ? window.stockCodesNew : [];
+      const codes = [];
+      list.forEach(s => {
+        const p = String(s).split(".");
+        const mkt = p[0], code = p[1];
+        if (!code || codes.indexOf(code) >= 0) return;
+        if ((mkt === "1" || mkt === "0") && /^\d{6}$/.test(code)) codes.push(code);
+        else if (mkt === "116" && /^\d{5}$/.test(code)) codes.push(code);
+      });
+      const arr = window.Data_fundSharesPositions;
+      const pos = (Array.isArray(arr) && arr.length) ? Number(arr[arr.length - 1][1]) : null;
+      const name = window.fS_name || "";
+      done();
+      if (!codes.length) return reject(new Error("备用源没有持仓"));
+      resolve({ codes, pos: isFinite(pos) ? pos : null, name });
+    };
+    el.onerror = () => { done(); reject(new Error("备用源加载失败")); };
+    el.src = "https://fund.eastmoney.com/pingzhongdata/" + code + ".js?v=" + Date.now();
+    document.head.appendChild(el);
+  }));
+  pzdLock = run.then(() => {}, () => {});
+  return run;
+}
+
+/* 季报持仓：只取前十大重仓股。
+   主源是天天基金 App 接口（带权重，最准），但它按 UA 白名单放行，
+   桌面 Chrome 一律返回 61136403「网络繁忙」。
+   主源不通时降级到 pingzhongdata（script 加载，不限 UA），等权近似。
+   返回 { date, rows:[{code,name,w}], src:"api"|"pzd", equal, pos } */
 async function fetchFundHold(code){
-  return memo("fh_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
-    const j = await req(EP.fundHold(code), { tries: 2, timeout: 12000 });
-    const d = (j && j.Datas) || {};
-    const rows = (d.fundStocks || []).map(it => ({
-      code: String(it.GPDM || "").trim(),
-      name: it.GPJC || "",
-      w: Number(it.JZBL),
-    })).filter(x => /^\d{6}$/.test(x.code) && isFinite(x.w) && x.w > 0);
-    if (!rows.length) throw new Error("持仓为空");
-    return { date: d.FSRQ || (j && j.Expansion) || "", rows };
-  }, true, true);
+  try{
+    return await memo("fh_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
+      const j = await req(EP.fundHold(code), { tries: 2, timeout: 12000 });
+      const d = (j && j.Datas) || {};
+      const rows = (d.fundStocks || []).map(it => ({
+        code: String(it.GPDM || "").trim(),
+        name: it.GPJC || "",
+        w: Number(it.JZBL),
+      })).filter(x => /^\d{6}$/.test(x.code) && isFinite(x.w) && x.w > 0);
+      if (!rows.length) throw new Error("季报持仓为空");
+      return { date: d.FSRQ || (j && j.Expansion) || "", rows, src: "api" };
+    }, true, true);
+  }catch(e){
+    /* 降级结果只放内存、不写 localStorage：主接口一恢复就该换回精确权重 */
+    return await memo("fhp_" + code, 30 * 60 * 1000, async () => {
+      const p = await holdFromPzd(code);
+      const w = 100 / p.codes.length;
+      return {
+        date: "", src: "pzd", equal: true, pos: p.pos,
+        rows: p.codes.map(c => ({ code: c, name: "", w })),
+      };
+    }, false, false);
+  }
 }
 
 /* 资产配置：股票/债券/现金占净值比（%），用来把重仓股涨幅放大到整只基金 */
@@ -675,6 +761,7 @@ function estimateFund(hold, alloc, px, today, navDay, loose){
   const pos = posKnown ? Math.min(alloc.stock, 100) / 100 : 1;
   return {
     y: norm * pos, norm, pos, posKnown, cover: sumW, items,
+    equal: !!hold.equal,                       /* true = 备用源，没有权重，只能等权 */
     reportDate: hold.date || "", allocDate: alloc ? alloc.date : "",
   };
 }
@@ -1144,12 +1231,17 @@ async function refreshAllInner(silent){
       if (q && q.kind === "fund" && codes.indexOf(c) < 0) codes.push(c);
     });
     if (codes.length){
-      const metas = await Promise.all(codes.map(async c => {
+      const metas = await mapLimit(codes, 3, async c => {
         let hold = null, alloc = null, holdErr = "", allocErr = "";
         try{ hold = await fetchFundHold(c); }catch(e){ holdErr = (e && e.message) || "请求失败"; }
         try{ alloc = await fetchFundAlloc(c); }catch(e){ allocErr = (e && e.message) || "请求失败"; }
+        /* 备用持仓源自带股票仓位，资产配置接口同样被 UA 卡住时用它顶上 */
+        if ((!alloc || !(alloc.stock > 0)) && hold && hold.pos != null){
+          alloc = { date: "", stock: hold.pos, bond: null, cash: null };
+          allocErr = "";
+        }
         return { c, hold, alloc, holdErr, allocErr };
-      }));
+      });
       /* 所有成分股合并成一次行情请求，别一只基金发一次 */
       const all = [];
       metas.forEach(m => {
@@ -1163,6 +1255,8 @@ async function refreshAllInner(silent){
         const q = quotes[m.c];
         const navDay = q && q.date ? String(q.date).replace(/-/g, "") : "";
         const rows = (m.hold && m.hold.rows) || [];
+        /* 备用源只给代码，名称从行情里回填，明细才看得懂 */
+        rows.forEach(r => { if (!r.name && hq[r.code] && hq[r.code].name) r.name = hq[r.code].name; });
         /* 诊断数据：估不出来的时候，让用户点开就能看到卡在哪一步 */
         ST.estDbg[m.c] = {
           navDay, nav: q ? q.price : null, pct: q ? q.pct : null,
@@ -1170,6 +1264,7 @@ async function refreshAllInner(silent){
           got: rows.filter(r => hq[r.code]).length,
           freshN: rows.filter(r => { const p = hq[r.code]; return p && p.pct != null && p.ts === today; }).length,
           holdDate: (m.hold && m.hold.date) || "",
+          src: (m.hold && m.hold.src) || "",
           holdErr: m.holdErr, allocErr: m.allocErr,
           pos: (m.alloc && isFinite(m.alloc.stock) && m.alloc.stock > 0) ? m.alloc.stock : null,
         };
@@ -1177,10 +1272,10 @@ async function refreshAllInner(silent){
         let e = estimateFund(m.hold, m.alloc, hq, today, navDay);
         if (!e) e = estimateFund(m.hold, m.alloc, hq, today, navDay, true);   // 兜底：报价确实是今天的就照算
         if (e){ e.at = new Date().toTimeString().slice(0, 5); EST[m.c] = e; }
-        else ST.estErr[m.c] = m.holdErr ? "持仓接口失败"
-                            : (!rows.length ? "季报持仓为空"
+        else ST.estErr[m.c] = !rows.length
+                            ? (/季报持仓为空|持仓为空/.test(m.holdErr) ? "季报持仓为空" : (m.holdErr || "持仓接口失败"))
                             : (!Object.keys(hq).length ? "成分股行情没取到"
-                            : "成分股报价不是今天"));
+                            : "成分股报价不是今天");
       });
     }
   }catch(e){ console.warn("[est]", e); }
@@ -1516,7 +1611,8 @@ function estDiag(r){
                " · 上一日 " + signed(d.pct, 2) + "%");
     lines.push("季报持仓 " + (d.n || 0) + " 只" + (d.holdDate ? "（" + d.holdDate + "）" : "") +
                " · 拿到行情 " + (d.got || 0) + " 只 · 今日报价 " + (d.freshN || 0) + " 只" +
-               (d.pos != null ? " · 股票仓位 " + fixed(d.pos, 2) + "%" : ""));
+               (d.pos != null ? " · 股票仓位 " + fixed(d.pos, 2) + "%" : "") +
+               (d.src === "pzd" ? " · 已切换到备用源（等权）" : ""));
     if (d.holdErr) lines.push("持仓接口：" + d.holdErr);
     if (d.allocErr) lines.push("资产配置接口：" + d.allocErr);
   }
@@ -1537,21 +1633,25 @@ function estPanel(r){
   if (!e) return estDiag(r);
   const items = e.items.map(it =>
     '<div class="er">' +
-      '<span class="ern">' + esc(it.name) + "<i>" + esc(it.code) + "</i></span>" +
-      '<span class="erw">' + fixed(it.w, 1) + "%</span>" +
+      '<span class="ern">' + esc(it.name || it.code) + "<i>" + esc(it.code) + "</i></span>" +
+      '<span class="erw">' + (e.equal ? "—" : fixed(it.w, 1) + "%") + "</span>" +
       '<span class="erp ' + clsOf(it.pct) + '">' + (it.pct == null ? "—" : signed(it.pct, 2) + "%") + "</span>" +
       '<span class="erc ' + clsOf(it.contrib) + '">' + (it.contrib == null ? "—" : signed(it.contrib, 2)) + "</span>" +
     "</div>").join("");
   return '<div class="est" id="est-' + esc(r.code) + '">' +
-    '<div class="est-h">季报 ' + esc(e.reportDate || "—") + " · 前十大覆盖 " + fixed(e.cover, 1) +
-      "% · " + (e.posKnown ? "股票仓位 " + fixed(e.pos * 100, 1) + "%" : "仓位未披露，按满仓计") +
+    '<div class="est-h">' +
+      (e.equal ? "备用源等权近似（没有各股权重）"
+               : "季报 " + esc(e.reportDate || "—") + " · 前十大覆盖 " + fixed(e.cover, 1) + "%") +
+      " · " + (e.posKnown ? "股票仓位 " + fixed(e.pos * 100, 1) + "%" : "仓位未披露，按满仓计") +
       (e.at ? " · 估算于 " + esc(e.at) : "") + "</div>" +
     '<div class="er erk"><span class="ern">成分股</span><span class="erw">权重</span>' +
       '<span class="erp">今日</span><span class="erc">贡献</span></div>' +
     items +
     '<div class="est-f">「贡献」是对净值的百分点影响，合计 ' + signed(e.norm, 2) +
       "% 为重仓股平均涨幅；折算到整只基金后，估算涨跌 " + signed(e.y, 2) +
-      "%。未披露的持仓按同向假设补齐，不是官方净值。</div>" +
+      "%。未披露的持仓按同向假设补齐，不是官方净值。" +
+      (e.equal ? "这次用的是备用数据源，没有各股权重，按等权平均估算，误差会比平时大一些。" : "") +
+      "</div>" +
   "</div>";
 }
 
