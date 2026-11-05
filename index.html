@@ -245,6 +245,7 @@
    0. 配置：将来加代理 / 换自建服务，只改 PROXY 一行
    ============================================================ */
 const PROXY = "";   // 例：'https://xxx.workers.dev/?u='  留空则浏览器直连数据源
+const VER = "v2026.11.05-1145";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
 function via(url){ return PROXY ? PROXY + encodeURIComponent(url) : url; }
 
 const UT = "7eea3edcaed734bea9cbfc24409ed989";
@@ -1124,6 +1125,7 @@ async function refreshAllInner(silent){
      只有「净值还没更新到当天」时才估，否则直接用官方净值。 */
   const EST = {};
   ST.estErr = {};
+  ST.estDbg = {};
   try{
     const codes = [];
     [...pf.holdings, ...etfW, ...watchW].forEach(x => {
@@ -1133,10 +1135,10 @@ async function refreshAllInner(silent){
     });
     if (codes.length){
       const metas = await Promise.all(codes.map(async c => {
-        let hold = null, alloc = null;
-        try{ hold = await fetchFundHold(c); }catch(e){}
-        try{ alloc = await fetchFundAlloc(c); }catch(e){}
-        return { c, hold, alloc };
+        let hold = null, alloc = null, holdErr = "", allocErr = "";
+        try{ hold = await fetchFundHold(c); }catch(e){ holdErr = (e && e.message) || "请求失败"; }
+        try{ alloc = await fetchFundAlloc(c); }catch(e){ allocErr = (e && e.message) || "请求失败"; }
+        return { c, hold, alloc, holdErr, allocErr };
       }));
       /* 所有成分股合并成一次行情请求，别一只基金发一次 */
       const all = [];
@@ -1150,12 +1152,25 @@ async function refreshAllInner(silent){
       metas.forEach(m => {
         const q = quotes[m.c];
         const navDay = q && q.date ? String(q.date).replace(/-/g, "") : "";
-        if (navDay === today){ ST.estErr[m.c] = "官方净值已更新"; return; }   // 净值已出，不用估
+        const rows = (m.hold && m.hold.rows) || [];
+        /* 诊断数据：估不出来的时候，让用户点开就能看到卡在哪一步 */
+        ST.estDbg[m.c] = {
+          navDay, nav: q ? q.price : null, pct: q ? q.pct : null,
+          n: rows.length,
+          got: rows.filter(r => hq[r.code]).length,
+          freshN: rows.filter(r => { const p = hq[r.code]; return p && p.pct != null && p.ts === today; }).length,
+          holdDate: (m.hold && m.hold.date) || "",
+          holdErr: m.holdErr, allocErr: m.allocErr,
+          pos: (m.alloc && isFinite(m.alloc.stock) && m.alloc.stock > 0) ? m.alloc.stock : null,
+        };
+        if (navDay === today){ ST.estErr[m.c] = "净值已更新"; return; }   // 净值已出，不用估
         let e = estimateFund(m.hold, m.alloc, hq, today, navDay);
         if (!e) e = estimateFund(m.hold, m.alloc, hq, today, navDay, true);   // 兜底：报价确实是今天的就照算
         if (e){ e.at = new Date().toTimeString().slice(0, 5); EST[m.c] = e; }
-        else ST.estErr[m.c] = !m.hold ? "季报持仓没取到"
-                            : (!Object.keys(hq).length ? "成分股行情没取到" : "成分股报价不是新的");
+        else ST.estErr[m.c] = m.holdErr ? "持仓接口失败"
+                            : (!rows.length ? "季报持仓为空"
+                            : (!Object.keys(hq).length ? "成分股行情没取到"
+                            : "成分股报价不是今天"));
       });
     }
   }catch(e){ console.warn("[est]", e); }
@@ -1209,7 +1224,8 @@ async function refreshAllInner(silent){
         const dy = q.date || "—";
         const est = EST[code] || null;
         const base = { code, name: nm, price: q.price, pct: q.pct, isFund: true, est,
-                       estErr: ST.estErr ? (ST.estErr[code] || null) : null };
+                       estErr: ST.estErr ? (ST.estErr[code] || null) : null,
+                       estDbg: ST.estDbg ? (ST.estDbg[code] || null) : null };
 
         if (!closes || closes.length < 61){
           rows.push({ ...base, state: "场外", sig: "—",
@@ -1485,9 +1501,35 @@ function renderMarket(){
 }
 
 /* 点开看是哪几只重仓股在拉：权重、今日涨跌、对净值的贡献（百分点） */
+/* 估值算不出来时的诊断面板：把每一步的结果摊开，方便定位是接口挂了还是数据没更新 */
+function estDiag(r){
+  const d = r.estDbg;
+  if (!r.isFund || !r.estErr || r.estErr === "净值已更新") return "";
+  const lines = [];
+  if (d){
+    lines.push("净值日 " + (d.navDay || "—") + " · 单位净值 " + fixed(d.nav, 4) +
+               " · 上一日 " + signed(d.pct, 2) + "%");
+    lines.push("季报持仓 " + (d.n || 0) + " 只" + (d.holdDate ? "（" + d.holdDate + "）" : "") +
+               " · 拿到行情 " + (d.got || 0) + " 只 · 今日报价 " + (d.freshN || 0) + " 只" +
+               (d.pos != null ? " · 股票仓位 " + fixed(d.pos, 2) + "%" : ""));
+    if (d.holdErr) lines.push("持仓接口：" + d.holdErr);
+    if (d.allocErr) lines.push("资产配置接口：" + d.allocErr);
+  }
+  /* 东财的季报持仓接口只对手机 UA 放行，电脑浏览器会被风控成「网络繁忙」 */
+  if (!/Mobile|Android|iPhone|iPad|iPod|HarmonyOS|MicroMessenger/i.test(navigator.userAgent))
+    lines.push("当前是电脑浏览器：这个接口只对手机 UA 放行，用手机打开就能算出来");
+  const head = r.estErr === "季报持仓为空"
+    ? "没有盘中估值：季报里没有股票持仓（债基/货基）"
+    : "估值暂缺：" + r.estErr;
+  return '<div class="est" id="est-' + esc(r.code) + '">' +
+    '<div class="est-h">' + esc(head) + "</div>" +
+    '<div class="est-f">' + (lines.length ? lines.map(esc).join("<br>") : "没有拿到诊断数据，下拉刷新一次试试") + "</div>" +
+  "</div>";
+}
+
 function estPanel(r){
   const e = r.est;
-  if (!e) return "";
+  if (!e) return estDiag(r);
   const items = e.items.map(it =>
     '<div class="er">' +
       '<span class="ern">' + esc(it.name) + "<i>" + esc(it.code) + "</i></span>" +
@@ -1516,11 +1558,14 @@ function renderEtf(){
       const sCls = r.sig === "加仓" ? "up" : r.sig === "减仓" ? "dn" : r.sig === "观望" ? "" : "info";
       const e = r.est;
       const shown = e ? e.y : r.pct;          // 有估算就显示估算，否则是上一个净值日
-      /* 没有「估」的时候，把原因挂在小字末尾，免得看到净值日涨跌却不知道为什么 */
-      const why = r.why + (!e && r.isFund && r.estErr && r.estErr !== "官方净值已更新"
-                            ? " · 估值暂缺（" + r.estErr + "）" : "");
-      return '<div class="li' + (e ? " tappable" : "") + '"' +
-               (e ? ' data-est="' + esc(r.code) + '"' : "") + ">" +
+      /* 没估出来时小字只挂一个短标签，具体卡在哪一步放到点开的面板里，
+         否则会跟趋势说明一起被两行截断，什么都看不全 */
+      const noEst = !e && r.isFund && r.estErr && r.estErr !== "净值已更新";
+      const why = r.why + (noEst ? (r.estErr === "季报持仓为空"
+                    ? " · 债基/货基，没有盘中估值" : " · 估值暂缺，点开看原因") : "");
+      const tap = !!e || !!noEst;
+      return '<div class="li' + (tap ? " tappable" : "") + '"' +
+               (tap ? ' data-est="' + esc(r.code) + '"' : "") + ">" +
         '<div class="li-n"><b>' + esc(r.name) + "</b>" +
           '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span>" +
           ' <span class="tag ' + sCls + '">' + esc(r.sig) + "</span>" +
@@ -1538,7 +1583,8 @@ function renderEtf(){
     '<div class="card-h"><span class="card-t">添加 ETF / 基金</span></div>' +
     '<div class="sm muted">场内：510300 沪深300 · 512480 半导体 · 588000 科创50</div>' +
     '<div class="sm muted" style="margin-top:2px">场外：110022 易方达消费 · 005827 易方达蓝筹</div>' +
-    '<div style="margin-top:10px"><button id="btnAddEtf" class="primary">+ 添加自选 ETF / 基金</button></div>';
+    '<div style="margin-top:10px"><button id="btnAddEtf" class="primary">+ 添加自选 ETF / 基金</button></div>' +
+    '<div class="xs dim" style="margin-top:10px">' + esc(VER) + "</div>";
 
   const btn = document.getElementById("btnAddEtf");
   if (btn) btn.onclick = () => {
