@@ -682,7 +682,7 @@ function holdFromPzd(code){
       resolve({ codes, pos: isFinite(pos) ? pos : null, name });
     };
     el.onerror = () => { done(); reject(new Error("备用源加载失败")); };
-    el.src = "https://fund.eastmoney.com/pingzhongdata/" + code + ".js?v=" + Date.now();
+    el.src = "https://fund.eastmoney.com/pingzhongdata/" + code + ".js?v=" + dateStr();
     document.head.appendChild(el);
   }));
   pzdLock = run.then(() => {}, () => {});
