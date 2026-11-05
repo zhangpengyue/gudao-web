@@ -240,6 +240,10 @@ const EP = {
   quote: syms => "https://qt.gtimg.cn/q=" + syms,
   kline: (sym, n) => "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param="
              + sym + ",day,,," + n + ",qfq",
+  /* 场外基金：天天基金 App 接口（返回带 Access-Control-Allow-Origin:*，可批量） */
+  fund : codes => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo?Fcodes="
+             + codes.join(",") + "&pageIndex=1&pageSize=50&plat=Android&appType=ttjj"
+             + "&product=EFund&Version=1&deviceid=1&_=" + Date.now(),
 };
 
 const INDICES = [
@@ -382,9 +386,14 @@ function openSheet(opt){
           return;
         }
         found = r;
+        const isFund = r.kind === "fund";
         hit.className = "hit";
         hit.innerHTML = "<b>" + esc(r.name) + "</b> · " + esc(code) +
-          (r.price != null ? '　<span class="dim">现价 ' + fixed(r.price, r.price < 10 ? 3 : 2) + "</span>" : "");
+          (isFund ? '　<span class="tag info">场外基金</span>' : "") +
+          (r.price != null
+            ? '　<span class="dim">' + (isFund ? "净值 " : "现价 ") +
+              fixed(r.price, isFund ? 4 : (r.price < 10 ? 3 : 2)) + "</span>"
+            : "");
         okBtn.disabled = false;
       }catch(e){
         if (my !== seq) return;
@@ -531,6 +540,30 @@ async function fetchQuotes(codes){
   return out;
 }
 
+/* 场外基金（含货币基金）：一次可以传多个代码。
+   返回 { 代码: { price: 单位净值, pct: 净值日涨跌, name, date: 净值日期, kind: "fund" } } */
+async function fetchFunds(codes){
+  const list = [...new Set((codes || []).filter(c => /^\d{6}$/.test(String(c || "").trim()))
+                                                       .map(c => String(c).trim()))];
+  if (!list.length) return {};
+  const j = await req(EP.fund(list), { timeout: 10000 });
+  const out = {};
+  ((j && j.Datas) || []).forEach(it => {
+    const code = String(it.FCODE || "").trim();
+    if (!code) return;
+    const nav = Number(it.NAV);
+    const chg = Number(it.NAVCHGRT);
+    out[code] = {
+      price: isFinite(nav) && nav > 0 ? nav : null,
+      pct: isFinite(chg) ? chg : null,
+      name: it.SHORTNAME || null,
+      date: it.PDATE || "",
+      kind: "fund",
+    };
+  });
+  return out;
+}
+
 /* 6 位代码 → 名称。按规则定市场，取不到再试另外两个市场。
    返回 { code, sym, name, price } 或 null。 */
 async function lookupName(code){
@@ -555,8 +588,16 @@ async function lookupName(code){
   });
   for (let i = 0; i < order.length; i++){
     const h = hits[order[i]];
-    if (h) return { code, sym: order[i], name: h.name, price: h.price };
+    if (h) return { code, sym: order[i], name: h.name, price: h.price, kind: "stock" };
   }
+
+  /* 腾讯查不到 → 不是股票、也不在场内，按场外基金再查一次 */
+  try{
+    const fs = await fetchFunds([code]);
+    const f = fs[code];
+    if (f && f.name) return { code, sym: null, name: f.name, price: f.price, kind: "fund", date: f.date };
+  }catch(e){ /* 基金接口失败就当查不到 */ }
+
   return null;
 }
 
@@ -904,6 +945,35 @@ async function refreshAll(silent){
 
   const [quotes] = await Promise.all([quoteTask, poolTask, idxTask]);
 
+  /* --- 场外基金净值（腾讯行情不认识这类代码，单独取一次并并入 quotes） --- */
+  {
+    const cand = [];
+    [...pf.holdings, ...etfW, ...watchW].forEach(x => {
+      const c = String((x && x.code) || "").trim();
+      if (!/^\d{6}$/.test(c)) return;
+      if (x.kind === "fund") cand.push(c);        // 已标记为场外基金
+      else if (!quotes[c]) cand.push(c);          // 行情里没有的，可能是老记录里的场外基金
+    });
+    if (cand.length){
+      try{
+        const fq = await fetchFunds(cand);
+        Object.keys(fq).forEach(c => { if (!quotes[c]) quotes[c] = fq[c]; });   // 股票、场内优先，不覆盖
+        let dirty = false;
+        const mark = (arr, save) => {
+          let hit = false;
+          arr.forEach(x => {
+            const c = String((x && x.code) || "").trim();
+            if (quotes[c] && quotes[c].kind === "fund" && x.kind !== "fund"){ x.kind = "fund"; hit = true; }
+          });
+          if (hit){ dirty = true; save(arr); }
+        };
+        mark(pf.holdings, a => { pf.holdings = a; savePortfolio(pf); });
+        mark(etfW, saveEtfWatch);
+        mark(watchW, saveWatch);
+      }catch(e){ warns.push("场外基金净值获取失败"); }
+    }
+  }
+
   /* 老记录里只存了代码的，用行情返回的名称补上，并写回本地（只补一次） */
   {
     let dirty = false;
@@ -935,8 +1005,9 @@ async function refreshAll(silent){
       let pnl = null;
       if (price != null && cost) pnl = (price / cost - 1) * 100;
       invested += mv || 0;
+      const isFund = h.kind === "fund" || (q && q.kind === "fund");
       return {
-        code: h.code, name: h.name || h.code, cost, shares,
+        code: h.code, name: h.name || h.code, cost, shares, isFund,
         price, pct: q ? q.pct : null, mv,
         pnl: pnl == null ? null : Math.round(pnl * 100) / 100,
         weight: total > 0 && mv ? Math.round(mv / total * 1000) / 10 : null,
@@ -956,10 +1027,21 @@ async function refreshAll(silent){
     for (const w of etfW){
       const code = String(w.code || "").trim();
       const q = quotes[code];
+
+      /* 场外基金：只有每日净值，没有 K 线，不套用均线信号 */
+      if (q && q.kind === "fund"){
+        rows.push({ code, name: w.name || q.name || code, price: q.price, pct: q.pct, isFund: true,
+                    state: "场外", sig: "场外",
+                    why: "场外基金 · 净值日 " + (q.date || "—") + "，按当日净值成交" });
+        continue;
+      }
+
       let t = null;
       try{ t = trendOf(await fetchKline(symOf(code), 80)); }catch(e){}
       if (!q){
-        rows.push({ code, name: w.name || code, price: null, pct: null, state: "获取失败", sig: "—", why: "实时行情获取失败，请检查代码" });
+        rows.push({ code, name: w.name || code, price: null, pct: null, state: "获取失败", sig: "—",
+                    isFund: w.kind === "fund",
+                    why: w.kind === "fund" ? "基金净值获取失败，请检查代码" : "实时行情获取失败，请检查代码" });
         continue;
       }
       const state = t ? t.state : "获取失败";
@@ -977,7 +1059,7 @@ async function refreshAll(silent){
       const code = String(w.code || "").trim();
       const q = quotes[code];
       rows.push({
-        code, name: w.name || code,
+        code, name: w.name || code, isFund: w.kind === "fund" || (q && q.kind === "fund"),
         price: q ? q.price : null, pct: q ? q.pct : null,
         buy: Number(w.buy) || null, stop: Number(w.stop) || null,
         vsBuy: q && w.buy ? Math.round((q.price / w.buy - 1) * 1000) / 10 : null,
@@ -1219,29 +1301,30 @@ function renderEtf(){
           '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span>" +
           ' <span class="tag ' + sCls + '">' + esc(r.sig) + "</span>" +
           "<i>" + esc(r.why) + "</i></div>" +
-        '<div class="li-v">' + fixed(r.price, 3) +
+        '<div class="li-v">' + fixed(r.price, r.isFund ? 4 : 3) +
           '<div class="xs ' + clsOf(r.pct) + '">' + signed(r.pct, 2) + "%</div></div>" +
         '<button class="mini" data-del-etf="' + esc(r.code) + '">删</button>' +
       "</div>";
     }).join("") + "</div>" : '<div class="empty">还没有自选 ETF，往下面加一个</div>');
 
   document.getElementById("etfAddCard").innerHTML =
-    '<div class="card-h"><span class="card-t">添加 ETF</span></div>' +
-    '<div class="sm muted">常用：510300 沪深300 · 510880 红利 · 512480 半导体 · 512880 证券 · 588000 科创50</div>' +
-    '<div style="margin-top:10px"><button id="btnAddEtf" class="primary">+ 添加自选 ETF</button></div>';
+    '<div class="card-h"><span class="card-t">添加 ETF / 基金</span></div>' +
+    '<div class="sm muted">场内：510300 沪深300 · 512480 半导体 · 588000 科创50</div>' +
+    '<div class="sm muted" style="margin-top:2px">场外：110022 易方达消费 · 005827 易方达蓝筹</div>' +
+    '<div style="margin-top:10px"><button id="btnAddEtf" class="primary">+ 添加自选 ETF / 基金</button></div>';
 
   const btn = document.getElementById("btnAddEtf");
   if (btn) btn.onclick = () => {
     openSheet({
-      title: "添加自选 ETF",
+      title: "添加自选 ETF / 基金",
       okText: "添加",
       fields: [
-        { key: "code", label: "代码（6 位，自动识别名称）", ph: "510300", num: true, maxlength: 6, lookup: true },
+        { key: "code", label: "代码（6 位，自动识别，场外基金也行）", ph: "510300", num: true, maxlength: 6, lookup: true },
       ],
       onSubmit: (v, found) => {
         const list = loadEtfWatch();
         if (list.some(x => String(x.code) === found.code)) return toast("已经添加过了");
-        list.push({ code: found.code, name: found.name });
+        list.push({ code: found.code, name: found.name, kind: found.kind || "stock" });
         saveEtfWatch(list);
         closeSheet();
         toast("已添加 " + found.name);
@@ -1274,9 +1357,10 @@ function renderPos(){
       return '<div class="li">' +
         '<div class="li-n"><b>' + esc(h.name) + "</b>" +
           '<span class="xs dim" style="margin-left:6px">' + esc(h.code) + "</span>" +
-          "<i>成本 " + fixed(h.cost, 2) +
-          " · " + (h.shares || 0) + " 股" + (h.weight != null ? " · 占 " + fixed(h.weight, 1) + "%" : "") + "</i></div>" +
-        '<div class="li-v">' + fixed(h.price, 2) +
+          "<i>成本 " + fixed(h.cost, h.isFund ? 4 : 2) +
+          " · " + (h.shares || 0) + (h.isFund ? " 份" : " 股") +
+          (h.weight != null ? " · 占 " + fixed(h.weight, 1) + "%" : "") + "</i></div>" +
+        '<div class="li-v">' + fixed(h.price, h.isFund ? 4 : 2) +
           '<div class="xs ' + pCls + '">' + (h.pnl == null ? "—" : signed(h.pnl, 2) + "%") + "</div></div>" +
         '<button class="mini" data-del-pos="' + esc(h.code) + '">删</button>' +
       "</div>";
@@ -1307,9 +1391,9 @@ function renderPos(){
       title: "添加持仓",
       okText: "添加",
       fields: [
-        { key: "code", label: "代码（6 位，自动识别名称）", ph: "600000", num: true, maxlength: 6, lookup: true },
-        { key: "cost", label: "成本价（元）", ph: "8.50", num: true },
-        { key: "shares", label: "股数", ph: "1000", num: true },
+        { key: "code", label: "代码（6 位，自动识别，场外基金也行）", ph: "600000", num: true, maxlength: 6, lookup: true },
+        { key: "cost", label: "成本价 / 基金单位净值", ph: "8.50", num: true },
+        { key: "shares", label: "股数 / 基金份额", ph: "1000", num: true },
       ],
       onSubmit: (v, found) => {
         const cost = Number(v.cost);
@@ -1318,7 +1402,7 @@ function renderPos(){
         if (!isFinite(shares) || shares <= 0) return toast("股数没填对");
         const p = loadPortfolio();
         if (p.holdings.some(h => String(h.code) === found.code)) return toast("已经有这只了");
-        p.holdings.push({ code: found.code, name: found.name, cost, shares });
+        p.holdings.push({ code: found.code, name: found.name, kind: found.kind || "stock", cost, shares });
         savePortfolio(p);
         closeSheet();
         toast("已添加 " + found.name);
@@ -1371,7 +1455,7 @@ function renderWatch(){
           '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span> " + flag +
           "<i>买 " + (r.buy || "-") + " · 损 " + (r.stop || "-") +
           (r.vsStop != null ? " · 距止损 " + signed(r.vsStop, 1) + "%" : "") + "</i></div>" +
-        '<div class="li-v">' + fixed(r.price, 2) +
+        '<div class="li-v">' + fixed(r.price, r.isFund ? 4 : 2) +
           '<div class="xs ' + clsOf(r.pct) + '">' + signed(r.pct, 2) + "%</div></div>" +
         '<button class="mini" data-del-watch="' + esc(r.code) + '">删</button>' +
       "</div>";
@@ -1387,7 +1471,7 @@ function renderWatch(){
       title: "添加盯盘股",
       okText: "添加",
       fields: [
-        { key: "code", label: "代码（6 位，自动识别名称）", ph: "600000", num: true, maxlength: 6, lookup: true },
+        { key: "code", label: "代码（6 位，自动识别，场外基金也行）", ph: "600000", num: true, maxlength: 6, lookup: true },
         { key: "buy", label: "计划买价（可留空）", ph: "跌到这个价提醒", num: true },
         { key: "stop", label: "止损价（可留空）", ph: "跌破这个价提醒", num: true },
       ],
