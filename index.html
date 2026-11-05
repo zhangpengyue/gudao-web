@@ -245,7 +245,7 @@
    0. 配置：将来加代理 / 换自建服务，只改 PROXY 一行
    ============================================================ */
 const PROXY = "";   // 例：'https://xxx.workers.dev/?u='  留空则浏览器直连数据源
-const VER = "v2026.11.05-1145";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
+const VER = "v2026.11.05-1155";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
 function via(url){ return PROXY ? PROXY + encodeURIComponent(url) : url; }
 
 const UT = "7eea3edcaed734bea9cbfc24409ed989";
@@ -493,23 +493,33 @@ function decodeText(buf){
   catch(e){ return new TextDecoder("utf-8").decode(buf); }
 }
 
-/* 内存缓存 + localStorage 兜底 */
-async function memo(key, ttlMs, producer, persist){
+/* 内存缓存 + localStorage 兜底
+   staleOk=true 时：跨天也认旧缓存，且请求失败时退回过期数据。
+   季报持仓一个季度才变一次，为了它每天重下一次、下不到就空着，没有意义。 */
+async function memo(key, ttlMs, producer, persist, staleOk){
   const now = Date.now();
   const m = memCache.get(key);
   if (m && now - m.at < ttlMs) return m.v;
 
   if (persist){
     const ls = LS.get("gdc_" + key, null);
-    if (ls && ls.d === dayKey() && now - ls.at < ttlMs){
+    if (ls && (staleOk || ls.d === dayKey()) && now - ls.at < ttlMs){
       memCache.set(key, { at: ls.at, v: ls.v });
       return ls.v;
     }
   }
-  const v = await producer();
-  memCache.set(key, { at: now, v });
-  if (persist) LS.set("gdc_" + key, { d: dayKey(), at: now, v });
-  return v;
+  try{
+    const v = await producer();
+    memCache.set(key, { at: now, v });
+    if (persist) LS.set("gdc_" + key, { d: dayKey(), at: now, v });
+    return v;
+  }catch(e){
+    if (persist && staleOk){
+      const ls = LS.get("gdc_" + key, null);
+      if (ls && ls.v){ memCache.set(key, { at: ls.at, v: ls.v }); return ls.v; }
+    }
+    throw e;
+  }
 }
 
 /* ============================================================
@@ -605,13 +615,13 @@ async function fetchFundNav(code, n){
       .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
     if (!rows.length) throw new Error("净值为空");
     return rows;
-  }, true);
+  }, true, true);
 }
 
 /* 季报持仓：只取前十大重仓股。一个季度才变一次，缓存 6 小时。
    返回 { date: 报告期, rows: [{ code, name, w }] }，w 是「占基金净值比」的百分数 */
 async function fetchFundHold(code){
-  return memo("fh_" + code, 6 * 60 * 60 * 1000, async () => {
+  return memo("fh_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
     const j = await req(EP.fundHold(code), { tries: 2, timeout: 12000 });
     const d = (j && j.Datas) || {};
     const rows = (d.fundStocks || []).map(it => ({
@@ -621,16 +631,16 @@ async function fetchFundHold(code){
     })).filter(x => /^\d{6}$/.test(x.code) && isFinite(x.w) && x.w > 0);
     if (!rows.length) throw new Error("持仓为空");
     return { date: d.FSRQ || (j && j.Expansion) || "", rows };
-  }, true);
+  }, true, true);
 }
 
 /* 资产配置：股票/债券/现金占净值比（%），用来把重仓股涨幅放大到整只基金 */
 async function fetchFundAlloc(code){
-  return memo("fa_" + code, 6 * 60 * 60 * 1000, async () => {
+  return memo("fa_" + code, 20 * 24 * 60 * 60 * 1000, async () => {
     const j = await req(EP.fundAlloc(code), { tries: 2, timeout: 12000 });
     const d = ((j && j.Datas) || [])[0] || {};
     return { date: d.FSRQ || "", stock: Number(d.GP), bond: Number(d.ZQ), cash: Number(d.HB) };
-  }, true);
+  }, true, true);
 }
 
 /* 盘中估值。三步：
@@ -1043,17 +1053,17 @@ async function refreshAllInner(silent){
 
   /* --- 指数趋势（5 个 K 线） + 指数当日涨跌幅 --- */
   let idxTask = (async () => {
-    const out = [];
     const qp = fetchIndexQuotes().catch(() => ({}));
-    for (const [name, sym] of INDICES){
+    /* 并行拉，别一个接一个等——串行 5 个会把后面的基金请求推到十几秒后，弱网容易超时 */
+    const out = await Promise.all(INDICES.map(async ([name, sym]) => {
       try{
         const closes = await fetchKline(sym, 80);
         const t = trendOf(closes);
-        out.push({ name, sym, ...(t || { state: "数据不足" }) });
+        return { name, sym, ...(t || { state: "数据不足" }) };
       }catch(e){
-        out.push({ name, sym, state: "获取失败" });
+        return { name, sym, state: "获取失败" };
       }
-    }
+    }));
     const iq = await qp;
     out.forEach(o => {
       const q = iq[o.sym];
@@ -1210,8 +1220,9 @@ async function refreshAllInner(silent){
 
   /* --- ETF --- */
   {
-    const rows = [];
-    for (const w of etfW){
+    /* 并行拉每只的 K 线 / 历史净值。原来是 for + await 串行，自选一多，
+       最后那只的请求要排在十几秒之后，弱网下很容易超时拿不到数据 */
+    const rows = await Promise.all(etfW.map(async w => {
       const code = String(w.code || "").trim();
       const q = quotes[code];
 
@@ -1228,40 +1239,34 @@ async function refreshAllInner(silent){
                        estDbg: ST.estDbg ? (ST.estDbg[code] || null) : null };
 
         if (!closes || closes.length < 61){
-          rows.push({ ...base, state: "场外", sig: "—",
-                      why: "场外基金 · 净值日 " + dy + "（历史净值不足 60 个交易日，判断不了趋势）" });
-          continue;
+          return { ...base, state: "场外", sig: "—",
+                   why: "场外基金 · 净值日 " + dy + "（历史净值不足 60 个交易日，判断不了趋势）" };
         }
         if (closes.every(v => v === closes[0])){
-          rows.push({ ...base, state: "场外", sig: "—",
-                      why: "净值恒定（货币/短债类），不做趋势判断 · 净值日 " + dy });
-          continue;
+          return { ...base, state: "场外", sig: "—",
+                   why: "净值恒定（货币/短债类），不做趋势判断 · 净值日 " + dy };
         }
         const ftr = trendOf(closes);
         if (!ftr){
-          rows.push({ ...base, state: "场外", sig: "—",
-                      why: "历史净值不足，无法判断趋势" });
-          continue;
+          return { ...base, state: "场外", sig: "—", why: "历史净值不足，无法判断趋势" };
         }
         const fs = etfSignal(ftr.state, ftr.dev);
-        rows.push({ ...base, state: ftr.state, sig: fs[0], dev: ftr.dev,
-                    why: fs[1].replace(/现价/g, "净值") + " · 净值日 " + dy });
-        continue;
+        return { ...base, state: ftr.state, sig: fs[0], dev: ftr.dev,
+                 why: fs[1].replace(/现价/g, "净值") + " · 净值日 " + dy };
       }
 
       let t = null;
       try{ t = trendOf(await fetchKline(symOf(code), 80)); }catch(e){}
       if (!q){
-        rows.push({ code, name: w.name || code, price: null, pct: null, state: "获取失败", sig: "—",
-                    isFund: w.kind === "fund",
-                    why: w.kind === "fund" ? "基金净值获取失败，请检查代码" : "实时行情获取失败，请检查代码" });
-        continue;
+        return { code, name: w.name || code, price: null, pct: null, state: "获取失败", sig: "—",
+                 isFund: w.kind === "fund",
+                 why: w.kind === "fund" ? "基金净值获取失败，请检查代码" : "实时行情获取失败，请检查代码" };
       }
       const state = t ? t.state : "获取失败";
       const dev = t ? (q.price / t.ma20 - 1) * 100 : null;
       const s = etfSignal(state, dev);
-      rows.push({ code, name: w.name || code, price: q.price, pct: q.pct, state, sig: s[0], why: s[1], dev });
-    }
+      return { code, name: w.name || code, price: q.price, pct: q.pct, state, sig: s[0], why: s[1], dev };
+    }));
     ST.etf = rows;
   }
 
