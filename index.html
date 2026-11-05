@@ -94,7 +94,8 @@
   .li:first-child{border-top:none}
   .li-n{flex:1;min-width:0}
   .li-n b{font-weight:500;font-size:13px}
-  .li-n i{display:block;font-style:normal;font-size:11px;color:var(--dim);margin-top:1px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .li-n i{font-style:normal;font-size:11px;color:var(--dim);margin-top:2px;line-height:1.45;
+    display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .li-v{text-align:right;font-variant-numeric:tabular-nums;font-size:13px;white-space:nowrap}
   .idx{width:42px;text-align:center;font-size:11px;color:var(--dim)}
   /* ---------- 底部导航 ---------- */
@@ -243,6 +244,10 @@ const EP = {
   /* 场外基金：天天基金 App 接口（返回带 Access-Control-Allow-Origin:*，可批量） */
   fund : codes => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNFInfo?Fcodes="
              + codes.join(",") + "&pageIndex=1&pageSize=50&plat=Android&appType=ttjj"
+             + "&product=EFund&Version=1&deviceid=1&_=" + Date.now(),
+  /* 场外基金历史净值（同样支持跨域），用于算均线趋势 */
+  fundNav: (code, n) => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNHisNetList?FCODE="
+             + code + "&pageIndex=1&pageSize=" + n + "&plat=Android&appType=ttjj"
              + "&product=EFund&Version=1&deviceid=1&_=" + Date.now(),
 };
 
@@ -564,6 +569,21 @@ async function fetchFunds(codes){
   return out;
 }
 
+/* 场外基金历史净值：接口按时间倒序给，这里统一转成按日期升序的净值数组。
+   净值一天才变一次，缓存 30 分钟足够。 */
+async function fetchFundNav(code, n){
+  return memo("fn_" + code + "_" + n, 30 * 60 * 1000, async () => {
+    const j = await req(EP.fundNav(code, n), { tries: 2, timeout: 12000 });
+    const arr = (j && j.Datas) || [];
+    const rows = arr
+      .map(it => ({ date: String(it.FSRQ || ""), nav: Number(it.DWJZ) }))
+      .filter(x => x.date && isFinite(x.nav) && x.nav > 0)
+      .sort((a, b) => (a.date < b.date ? -1 : a.date > b.date ? 1 : 0));
+    if (!rows.length) throw new Error("净值为空");
+    return rows;
+  }, true);
+}
+
 /* 6 位代码 → 名称。按规则定市场，取不到再试另外两个市场。
    返回 { code, sym, name, price } 或 null。 */
 async function lookupName(code){
@@ -818,7 +838,13 @@ function etfSignal(state, dev){
     if (dev != null && dev <= 3) return ["加仓", "多头趋势，现价贴近MA20（偏离" + signed(dev, 1) + "%），回踩到位可加仓"];
     return ["持有", dev != null ? "多头趋势但已偏离MA20 " + signed(dev, 1) + "%，不追高，持有等回踩" : "多头趋势，持有"];
   }
-  if (state === "震荡") return ["观望", "趋势未确立（MA20/MA60未多头排列），方向不明，观望等确认"];
+  if (state === "震荡"){
+    if (dev != null && dev >= 5)
+      return ["观望", "中期趋势未明朗，但短期已高于MA20 " + signed(dev, 1) + "%，涨幅偏大，别追，等回踩"];
+    if (dev != null && dev <= -5)
+      return ["观望", "中期趋势未明朗，短期低于MA20 " + fixed(-dev, 1) + "%，跌出空间，可小仓分批"];
+    return ["观望", "趋势未确立（MA20/MA60未多头排列），方向不明，观望等确认"];
+  }
   if (state === "空头") return ["减仓", "趋势向下" + (dev != null ? "（现价低于MA20 " + fixed(-dev, 1) + "%）" : "") + "，反弹减仓回避"];
   return ["—", "数据不足，无法判断"];
 }
@@ -1028,11 +1054,34 @@ async function refreshAll(silent){
       const code = String(w.code || "").trim();
       const q = quotes[code];
 
-      /* 场外基金：只有每日净值，没有 K 线，不套用均线信号 */
+      /* 场外基金：用历史净值算均线，规则与 ETF 完全一致（数据只到 T-1 净值） */
       if (q && q.kind === "fund"){
-        rows.push({ code, name: w.name || q.name || code, price: q.price, pct: q.pct, isFund: true,
-                    state: "场外", sig: "场外",
-                    why: "场外基金 · 净值日 " + (q.date || "—") + "，按当日净值成交" });
+        let navs = null;
+        try{ navs = await fetchFundNav(code, 100); }catch(e){}
+        const closes = navs ? navs.map(x => x.nav) : null;
+        const nm = w.name || q.name || code;
+        const dy = q.date || "—";
+
+        if (!closes || closes.length < 61){
+          rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true, state: "场外", sig: "—",
+                      why: "场外基金 · 净值日 " + dy + "（历史净值不足 60 个交易日，判断不了趋势）" });
+          continue;
+        }
+        if (closes.every(v => v === closes[0])){
+          rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true, state: "场外", sig: "—",
+                      why: "净值恒定（货币/短债类），不做趋势判断 · 净值日 " + dy });
+          continue;
+        }
+        const ftr = trendOf(closes);
+        if (!ftr){
+          rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true, state: "场外", sig: "—",
+                      why: "历史净值不足，无法判断趋势" });
+          continue;
+        }
+        const fs = etfSignal(ftr.state, ftr.dev);
+        rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true,
+                    state: ftr.state, sig: fs[0], dev: ftr.dev,
+                    why: fs[1].replace(/现价/g, "净值") + " · 净值日 " + dy });
         continue;
       }
 
@@ -1293,7 +1342,7 @@ function renderMarket(){
 function renderEtf(){
   const rows = ST.etf;
   document.getElementById("etfCard").innerHTML =
-    '<div class="card-h"><span class="card-t">自选 ETF</span><span class="xs dim">' + rows.length + " 只</span></div>" +
+    '<div class="card-h"><span class="card-t">自选 ETF / 基金</span><span class="xs dim">' + rows.length + " 只</span></div>" +
     (rows.length ? '<div class="list">' + rows.map(r => {
       const sCls = r.sig === "加仓" ? "up" : r.sig === "减仓" ? "dn" : r.sig === "观望" ? "" : "info";
       return '<div class="li">' +
@@ -1305,7 +1354,9 @@ function renderEtf(){
           '<div class="xs ' + clsOf(r.pct) + '">' + signed(r.pct, 2) + "%</div></div>" +
         '<button class="mini" data-del-etf="' + esc(r.code) + '">删</button>' +
       "</div>";
-    }).join("") + "</div>" : '<div class="empty">还没有自选 ETF，往下面加一个</div>');
+    }).join("") + "</div>" +
+      '<div class="xs dim" style="margin-top:8px">场外基金的判断基于最近净值（T-1），按日净值成交，仅供参考</div>'
+      : '<div class="empty">还没有自选 ETF / 基金，往下面加一个</div>');
 
   document.getElementById("etfAddCard").innerHTML =
     '<div class="card-h"><span class="card-t">添加 ETF / 基金</span></div>' +
