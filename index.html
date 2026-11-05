@@ -98,6 +98,20 @@
     display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
   .li-v{text-align:right;font-variant-numeric:tabular-nums;font-size:13px;white-space:nowrap}
   .idx{width:42px;text-align:center;font-size:11px;color:var(--dim)}
+  /* ---------- 基金估算明细 ---------- */
+  .li.tappable{cursor:pointer}
+  .li.tappable:active{background:var(--card2)}
+  .est{display:none;padding:2px 14px 12px;background:var(--card2);border-top:1px solid var(--line)}
+  .est.on{display:block}
+  .est-h{font-size:11px;color:var(--dim);padding:8px 0 7px;line-height:1.5}
+  .er{display:grid;grid-template-columns:1fr 46px 54px 46px;gap:6px;align-items:baseline;
+    font-size:11px;font-variant-numeric:tabular-nums;padding:3px 0}
+  .er.erk{color:var(--dim);border-bottom:1px solid var(--line);padding-bottom:4px;margin-bottom:2px}
+  .ern{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .ern i{font-style:normal;color:var(--dim);margin-left:4px;font-size:10px}
+  .erw{text-align:right;color:var(--dim)}
+  .erp,.erc{text-align:right}
+  .est-f{font-size:11px;color:var(--dim);margin-top:8px;line-height:1.5}
   /* ---------- 底部导航 ---------- */
   nav{
     position:fixed;left:0;right:0;bottom:0;z-index:30;
@@ -249,6 +263,14 @@ const EP = {
   fundNav: (code, n) => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNHisNetList?FCODE="
              + code + "&pageIndex=1&pageSize=" + n + "&plat=Android&appType=ttjj"
              + "&product=EFund&Version=1&deviceid=1&_=" + Date.now(),
+  /* 场外基金季报持仓：前十大重仓股 + 各自占净值比，用于盘中估值 */
+  fundHold: code => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNInverstPosition?FCODE="
+             + code + "&deviceid=1&plat=Android&product=EFund&version=1&appType=ttjj"
+             + "&_=" + Date.now(),
+  /* 场外基金资产配置：股票/债券/现金各占多少，用于把重仓股涨幅放大到整只基金 */
+  fundAlloc: code => "https://fundmobapi.eastmoney.com/FundMNewApi/FundMNAssetAllocationNew?FCODE="
+             + code + "&deviceid=1&plat=Android&product=EFund&version=1&appType=ttjj"
+             + "&_=" + Date.now(),
 };
 
 const INDICES = [
@@ -540,7 +562,8 @@ async function fetchQuotes(codes){
       const prev = Number(f[4]);
       pct = prev ? (price / prev - 1) * 100 : null;
     }
-    out[code] = { price, pct, name: (f[1] || "").trim() || null };
+    out[code] = { price, pct, name: (f[1] || "").trim() || null,
+                  ts: String(f[30] || "").slice(0, 8) };   // 行情日期，用于判断是不是当天的价
   });
   return out;
 }
@@ -582,6 +605,61 @@ async function fetchFundNav(code, n){
     if (!rows.length) throw new Error("净值为空");
     return rows;
   }, true);
+}
+
+/* 季报持仓：只取前十大重仓股。一个季度才变一次，缓存 6 小时。
+   返回 { date: 报告期, rows: [{ code, name, w }] }，w 是「占基金净值比」的百分数 */
+async function fetchFundHold(code){
+  return memo("fh_" + code, 6 * 60 * 60 * 1000, async () => {
+    const j = await req(EP.fundHold(code), { tries: 2, timeout: 12000 });
+    const d = (j && j.Datas) || {};
+    const rows = (d.fundStocks || []).map(it => ({
+      code: String(it.GPDM || "").trim(),
+      name: it.GPJC || "",
+      w: Number(it.JZBL),
+    })).filter(x => /^\d{6}$/.test(x.code) && isFinite(x.w) && x.w > 0);
+    if (!rows.length) throw new Error("持仓为空");
+    return { date: d.FSRQ || (j && j.Expansion) || "", rows };
+  }, true);
+}
+
+/* 资产配置：股票/债券/现金占净值比（%），用来把重仓股涨幅放大到整只基金 */
+async function fetchFundAlloc(code){
+  return memo("fa_" + code, 6 * 60 * 60 * 1000, async () => {
+    const j = await req(EP.fundAlloc(code), { tries: 2, timeout: 12000 });
+    const d = ((j && j.Datas) || [])[0] || {};
+    return { date: d.FSRQ || "", stock: Number(d.GP), bond: Number(d.ZQ), cash: Number(d.HB) };
+  }, true);
+}
+
+/* 盘中估值。三步：
+   ① Σ(权重×涨跌幅) ÷ Σ权重 → 重仓股的平均涨幅（这就是归一化，
+      等于假设「季报没披露的那部分」走势和重仓股一致）
+   ② × 股票仓位 → 放大到整只基金（债券、现金按 0 处理）
+   ③ 昨日净值 ×(1+Y) → 估算净值
+   返回 { y, norm, pos, cover, items, reportDate } */
+function estimateFund(hold, alloc, px, today){
+  if (!hold || !hold.rows || !hold.rows.length) return null;
+  let sumW = 0, sumWR = 0;
+  const items = [];
+  hold.rows.forEach(h => {
+    const p = px ? px[h.code] : null;
+    /* 只认「行情日期 = 今天」的报价。周末、节假日打开时拿到的是上一个交易日的价，
+       那天的涨跌已经含在净值里了，再算一遍会重复计算。 */
+    const fresh = p && p.pct != null && (!today || !p.ts || p.ts === today);
+    const pct = fresh ? p.pct : null;
+    if (pct != null){ sumW += h.w; sumWR += h.w * pct; }
+    items.push({ code: h.code, name: h.name, w: h.w, pct,
+                 contrib: pct == null ? null : h.w * pct / 100 });
+  });
+  if (sumW <= 0) return null;
+  const norm = sumWR / sumW;
+  const posKnown = !!(alloc && isFinite(alloc.stock) && alloc.stock > 0);
+  const pos = posKnown ? Math.min(alloc.stock, 100) / 100 : 1;
+  return {
+    y: norm * pos, norm, pos, posKnown, cover: sumW, items,
+    reportDate: hold.date || "", allocDate: alloc ? alloc.date : "",
+  };
 }
 
 /* 6 位代码 → 名称。按规则定市场，取不到再试另外两个市场。
@@ -1018,23 +1096,64 @@ async function refreshAll(silent){
     if (dirty) { /* 已写回，下次打开就是带名称的 */ }
   }
 
+  /* --- 场外基金盘中估值 ---
+     季报持仓 + 实时股价按权重加权，拟合当天的净值涨跌。
+     只有「净值还没更新到当天」时才估，否则直接用官方净值。 */
+  const EST = {};
+  {
+    const codes = [];
+    [...pf.holdings, ...etfW, ...watchW].forEach(x => {
+      const c = String((x && x.code) || "").trim();
+      const q = quotes[c];
+      if (q && q.kind === "fund" && codes.indexOf(c) < 0) codes.push(c);
+    });
+    if (codes.length){
+      const metas = await Promise.all(codes.map(async c => {
+        let hold = null, alloc = null;
+        try{ hold = await fetchFundHold(c); }catch(e){}
+        try{ alloc = await fetchFundAlloc(c); }catch(e){}
+        return { c, hold, alloc };
+      }));
+      /* 所有成分股合并成一次行情请求，别一只基金发一次 */
+      const all = [];
+      metas.forEach(m => {
+        if (!m.hold) return;
+        m.hold.rows.forEach(r => { if (all.indexOf(r.code) < 0) all.push(r.code); });
+      });
+      let hq = {};
+      if (all.length){ try{ hq = await fetchQuotes(all); }catch(e){} }
+      const today = dateStr();
+      metas.forEach(m => {
+        const q = quotes[m.c];
+        const navDay = q && q.date ? String(q.date).replace(/-/g, "") : "";
+        if (navDay === today) return;              // 官方净值已出，不用估
+        const e = estimateFund(m.hold, m.alloc, hq, today);
+        if (e) EST[m.c] = e;
+      });
+    }
+  }
+
   /* --- 持仓 --- */
   {
     const total = pf.total;
     let invested = 0;
     const holdings = pf.holdings.map(h => {
-      const q = quotes[String(h.code || "").trim()];
+      const code = String(h.code || "").trim();
+      const q = quotes[code];
       const cost = Number(h.cost) || 0;
       const shares = Number(h.shares) || 0;
-      const price = q ? q.price : null;
+      const nav = q ? q.price : null;
+      const est = EST[code];
+      /* 场外基金盘中用估算净值算市值，这样「今日浮盈」才有意义 */
+      const price = (est && nav != null) ? nav * (1 + est.y / 100) : nav;
       const mv = price != null && shares ? price * shares : (Number(h.mv) || 0);
       let pnl = null;
       if (price != null && cost) pnl = (price / cost - 1) * 100;
       invested += mv || 0;
       const isFund = h.kind === "fund" || (q && q.kind === "fund");
       return {
-        code: h.code, name: h.name || h.code, cost, shares, isFund,
-        price, pct: q ? q.pct : null, mv,
+        code, name: h.name || h.code, cost, shares, isFund,
+        price, nav, estY: est ? est.y : null, pct: q ? q.pct : null, mv,
         pnl: pnl == null ? null : Math.round(pnl * 100) / 100,
         weight: total > 0 && mv ? Math.round(mv / total * 1000) / 10 : null,
       };
@@ -1061,26 +1180,27 @@ async function refreshAll(silent){
         const closes = navs ? navs.map(x => x.nav) : null;
         const nm = w.name || q.name || code;
         const dy = q.date || "—";
+        const est = EST[code] || null;
+        const base = { code, name: nm, price: q.price, pct: q.pct, isFund: true, est };
 
         if (!closes || closes.length < 61){
-          rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true, state: "场外", sig: "—",
+          rows.push({ ...base, state: "场外", sig: "—",
                       why: "场外基金 · 净值日 " + dy + "（历史净值不足 60 个交易日，判断不了趋势）" });
           continue;
         }
         if (closes.every(v => v === closes[0])){
-          rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true, state: "场外", sig: "—",
+          rows.push({ ...base, state: "场外", sig: "—",
                       why: "净值恒定（货币/短债类），不做趋势判断 · 净值日 " + dy });
           continue;
         }
         const ftr = trendOf(closes);
         if (!ftr){
-          rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true, state: "场外", sig: "—",
+          rows.push({ ...base, state: "场外", sig: "—",
                       why: "历史净值不足，无法判断趋势" });
           continue;
         }
         const fs = etfSignal(ftr.state, ftr.dev);
-        rows.push({ code, name: nm, price: q.price, pct: q.pct, isFund: true,
-                    state: ftr.state, sig: fs[0], dev: ftr.dev,
+        rows.push({ ...base, state: ftr.state, sig: fs[0], dev: ftr.dev,
                     why: fs[1].replace(/现价/g, "净值") + " · 净值日 " + dy });
         continue;
       }
@@ -1107,9 +1227,10 @@ async function refreshAll(silent){
     for (const w of watchW){
       const code = String(w.code || "").trim();
       const q = quotes[code];
+      const e = EST[code];
       rows.push({
         code, name: w.name || code, isFund: w.kind === "fund" || (q && q.kind === "fund"),
-        price: q ? q.price : null, pct: q ? q.pct : null,
+        price: q ? q.price : null, pct: q ? q.pct : null, estY: e ? e.y : null,
         buy: Number(w.buy) || null, stop: Number(w.stop) || null,
         vsBuy: q && w.buy ? Math.round((q.price / w.buy - 1) * 1000) / 10 : null,
         vsStop: q && w.stop ? Math.round((q.price / w.stop - 1) * 1000) / 10 : null,
@@ -1339,23 +1460,49 @@ function renderMarket(){
       "</div>").join("") : '<div class="empty">今日无未炸板的早封首板</div>') + "</div>";
 }
 
+/* 点开看是哪几只重仓股在拉：权重、今日涨跌、对净值的贡献（百分点） */
+function estPanel(r){
+  const e = r.est;
+  if (!e) return "";
+  const items = e.items.map(it =>
+    '<div class="er">' +
+      '<span class="ern">' + esc(it.name) + "<i>" + esc(it.code) + "</i></span>" +
+      '<span class="erw">' + fixed(it.w, 1) + "%</span>" +
+      '<span class="erp ' + clsOf(it.pct) + '">' + (it.pct == null ? "—" : signed(it.pct, 2) + "%") + "</span>" +
+      '<span class="erc ' + clsOf(it.contrib) + '">' + (it.contrib == null ? "—" : signed(it.contrib, 2)) + "</span>" +
+    "</div>").join("");
+  return '<div class="est" id="est-' + esc(r.code) + '">' +
+    '<div class="est-h">季报 ' + esc(e.reportDate || "—") + " · 前十大覆盖 " + fixed(e.cover, 1) +
+      "% · " + (e.posKnown ? "股票仓位 " + fixed(e.pos * 100, 1) + "%" : "仓位未披露，按满仓计") + "</div>" +
+    '<div class="er erk"><span class="ern">成分股</span><span class="erw">权重</span>' +
+      '<span class="erp">今日</span><span class="erc">贡献</span></div>' +
+    items +
+    '<div class="est-f">「贡献」是对净值的百分点影响，合计 ' + signed(e.norm, 2) +
+      "% 为重仓股平均涨幅；折算到整只基金后，估算涨跌 " + signed(e.y, 2) +
+      "%。未披露的持仓按同向假设补齐，不是官方净值。</div>" +
+  "</div>";
+}
+
 function renderEtf(){
   const rows = ST.etf;
   document.getElementById("etfCard").innerHTML =
     '<div class="card-h"><span class="card-t">自选 ETF / 基金</span><span class="xs dim">' + rows.length + " 只</span></div>" +
     (rows.length ? '<div class="list">' + rows.map(r => {
       const sCls = r.sig === "加仓" ? "up" : r.sig === "减仓" ? "dn" : r.sig === "观望" ? "" : "info";
-      return '<div class="li">' +
+      const e = r.est;
+      const shown = e ? e.y : r.pct;          // 有估算就显示估算，否则是上一个净值日
+      return '<div class="li' + (e ? " tappable" : "") + '"' +
+               (e ? ' data-est="' + esc(r.code) + '"' : "") + ">" +
         '<div class="li-n"><b>' + esc(r.name) + "</b>" +
           '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span>" +
           ' <span class="tag ' + sCls + '">' + esc(r.sig) + "</span>" +
           "<i>" + esc(r.why) + "</i></div>" +
         '<div class="li-v">' + fixed(r.price, r.isFund ? 4 : 3) +
-          '<div class="xs ' + clsOf(r.pct) + '">' + signed(r.pct, 2) + "%</div></div>" +
+          '<div class="xs ' + clsOf(shown) + '">' + (e ? "估 " : "") + signed(shown, 2) + "%</div></div>" +
         '<button class="mini" data-del-etf="' + esc(r.code) + '">删</button>' +
-      "</div>";
+      "</div>" + estPanel(r);
     }).join("") + "</div>" +
-      '<div class="xs dim" style="margin-top:8px">场外基金的判断基于最近净值（T-1），按日净值成交，仅供参考</div>'
+      '<div class="xs dim" style="margin-top:8px">场外基金带「估」的是盘中估算（季报持仓 + 实时股价拟合），点该行看成分股；估算不是官方净值，仅供参考</div>'
       : '<div class="empty">还没有自选 ETF / 基金，往下面加一个</div>');
 
   document.getElementById("etfAddCard").innerHTML =
@@ -1390,6 +1537,15 @@ function renderEtf(){
       refreshAll(true);
     };
   });
+
+  /* 点整行展开估算明细，点「删」不触发 */
+  document.querySelectorAll("#etfCard .li[data-est]").forEach(li => {
+    li.onclick = ev => {
+      if (ev.target.closest("[data-del-etf]")) return;
+      const p = document.getElementById("est-" + li.getAttribute("data-est"));
+      if (p) p.classList.toggle("on");
+    };
+  });
 }
 
 function renderPos(){
@@ -1410,15 +1566,20 @@ function renderPos(){
           '<span class="xs dim" style="margin-left:6px">' + esc(h.code) + "</span>" +
           "<i>成本 " + fixed(h.cost, h.isFund ? 4 : 2) +
           " · " + (h.shares || 0) + (h.isFund ? " 份" : " 股") +
-          (h.weight != null ? " · 占 " + fixed(h.weight, 1) + "%" : "") + "</i></div>" +
+          (h.weight != null ? " · 占 " + fixed(h.weight, 1) + "%" : "") +
+          (h.estY != null ? " · 估 " + signed(h.estY, 2) + "%" : "") + "</i></div>" +
         '<div class="li-v">' + fixed(h.price, h.isFund ? 4 : 2) +
+          (h.estY != null ? '<span class="xs dim" style="margin-left:3px">估</span>' : "") +
           '<div class="xs ' + pCls + '">' + (h.pnl == null ? "—" : signed(h.pnl, 2) + "%") + "</div></div>" +
         '<button class="mini" data-del-pos="' + esc(h.code) + '">删</button>' +
       "</div>";
     }).join("") + "</div>" : '<div class="empty">还没有持仓记录</div>') +
     (total > 0 ? '<div class="split"></div><div class="sm muted">持仓市值 ' +
       Math.round(pf.invested).toLocaleString() + " 元 · 现金 " +
-      Math.round(total - pf.invested).toLocaleString() + " 元</div>" : "");
+      Math.round(total - pf.invested).toLocaleString() + " 元</div>" : "") +
+    (pf.holdings.some(h => h.estY != null)
+      ? '<div class="xs dim" style="margin-top:6px">带「估」的场外基金按盘中估算净值算，官方净值每晚才更新</div>'
+      : "");
 
   document.getElementById("pfAddCard").innerHTML =
     '<div class="card-h"><span class="card-t">操作</span></div>' +
@@ -1507,7 +1668,8 @@ function renderWatch(){
           "<i>买 " + (r.buy || "-") + " · 损 " + (r.stop || "-") +
           (r.vsStop != null ? " · 距止损 " + signed(r.vsStop, 1) + "%" : "") + "</i></div>" +
         '<div class="li-v">' + fixed(r.price, r.isFund ? 4 : 2) +
-          '<div class="xs ' + clsOf(r.pct) + '">' + signed(r.pct, 2) + "%</div></div>" +
+          '<div class="xs ' + clsOf(r.estY != null ? r.estY : r.pct) + '">' +
+            (r.estY != null ? "估 " : "") + signed(r.estY != null ? r.estY : r.pct, 2) + "%</div></div>" +
         '<button class="mini" data-del-watch="' + esc(r.code) + '">删</button>' +
       "</div>";
     }).join("") + "</div>" : '<div class="empty">还没有盯盘股</div>');
