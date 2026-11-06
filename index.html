@@ -178,6 +178,48 @@
   .fld .hit b{font-size:14px;font-weight:600;color:var(--tx)}
   .sheet-ok{width:100%;padding:12px;border-radius:10px;font-size:15px;margin-top:6px}
   .sheet-ok:disabled{opacity:.4}
+  /* ---------- 情绪轨迹 ---------- */
+  .trk{display:flex;align-items:flex-end;gap:3px;height:78px;margin:12px 0 2px}
+  /* 记录天数少时柱图居中收拢，别散在卡片两端 */
+  .trk.few{justify-content:center;gap:16px}
+  .trk.few .trk-c{flex:0 0 38px}
+  .trk-c{flex:1;min-width:0;height:100%;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;gap:3px}
+  .trk-b{width:100%;max-width:22px;border-radius:3px 3px 0 0;min-height:2px;
+    background:linear-gradient(180deg,#e8433a,#7d2b26)}
+  .trk-b.q{background:linear-gradient(180deg,#4b5a6e,#313a47)}
+  .trk-v{font-size:9px;color:var(--mu);line-height:1}
+  .trk-l{font-size:9px;color:var(--dim);white-space:nowrap}
+  .trk-d{font-size:12px;line-height:1.6;margin-top:10px;color:#c9cdd4}
+  .trk-d b{color:var(--tx);font-weight:500}
+  .trk-n{font-size:11px;color:var(--dim);margin-top:6px;line-height:1.5}
+  /* ---------- 提醒横幅（放在 sticky 头部里，不遮挡内容） ---------- */
+  .alertbar{display:none;margin-top:8px;background:#3b1d1e;border:1px solid rgba(232,67,58,.55);
+    color:#ffd9d6;border-radius:9px;padding:9px 11px;font-size:12px;line-height:1.5;cursor:pointer}
+  .alertbar.on{display:block;animation:alertIn .25s ease-out}
+  .alertbar b{color:#fff}
+  @keyframes alertIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:translateY(0)}}
+  /* ---------- 计划 / 复盘 ---------- */
+  .seg{display:flex;gap:6px;margin-bottom:12px}
+  .seg button{flex:1;padding:7px 0;font-size:12px}
+  .seg button.on{background:#24405f;border-color:#2c4a6e;color:#cfe2ff}
+  .pi{border-top:1px solid var(--line);padding:10px 0}
+  .pi:first-child{border-top:none}
+  .pi-h{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+  .pi-h b{font-size:13px;font-weight:500}
+  .pi-r{font-size:12px;color:#c9cdd4;margin-top:5px;line-height:1.55;word-break:break-word}
+  .pi-m{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.5}
+  .pi-b{display:flex;gap:2px;margin-top:4px}
+  .stat{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+  .stat .kpi-v{font-size:17px}
+  .sheet textarea,.sheet select{width:100%;background:var(--card2);border:1px solid var(--line);
+    border-radius:9px;color:var(--tx);font:inherit;font-size:14px;padding:10px 12px;outline:none}
+  .sheet textarea{resize:vertical;min-height:76px;line-height:1.5}
+  .sheet select{font-size:15px}
+  .fld .hint{font-size:11px;color:var(--dim);margin-top:5px;line-height:1.4}
+  /* 6 个页签时收窄一点，避免窄屏挤成两行 */
+  nav button{font-size:10.5px;letter-spacing:-.2px;padding:9px 0 10px}
+  nav .dot{width:14px;height:14px}
+  textarea,select{-webkit-appearance:none;appearance:none}
 </style>
 </head>
 <body>
@@ -188,12 +230,14 @@
     <button id="btnRefresh">刷新</button>
   </div>
   <div class="hd-sub" id="hdSub"><span>正在加载…</span></div>
+  <div class="alertbar" id="alertBar"></div>
 </header>
 
 <main id="main">
   <section class="view" data-view="advice">
     <div id="banner"></div>
     <div class="card hero" id="hero"></div>
+    <div class="card" id="trendCard"></div>
     <div class="card" id="posCard"></div>
     <div class="card" id="idxCard"></div>
     <div class="card" id="riskCard"></div>
@@ -220,6 +264,16 @@
     <div class="card" id="watchCard"></div>
     <div class="card" id="watchAddCard"></div>
   </section>
+
+  <section class="view" data-view="plan" hidden>
+    <div class="seg" id="planSeg">
+      <button data-pt="plan" class="on">交易计划</button>
+      <button data-pt="review">盘后复盘</button>
+      <button data-pt="stats">统计</button>
+    </div>
+    <div class="card" id="planCard"></div>
+    <div class="card" id="planAddCard"></div>
+  </section>
 </main>
 
 <nav id="nav">
@@ -228,6 +282,7 @@
   <button data-go="etf"><span class="dot"></span>ETF</button>
   <button data-go="pos"><span class="dot"></span>持仓</button>
   <button data-go="watch"><span class="dot"></span>盯盘</button>
+  <button data-go="plan"><span class="dot"></span>复盘</button>
 </nav>
 
 <div class="toast" id="toast"></div>
@@ -245,7 +300,7 @@
    0. 配置：将来加代理 / 换自建服务，只改 PROXY 一行
    ============================================================ */
 const PROXY = "";   // 例：'https://xxx.workers.dev/?u='  留空则浏览器直连数据源
-const VER = "v2026.11.05-1404";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
+const VER = "v2026.11.06-0940";   // 页面版本，显示在添加卡片底部，方便确认拿到的是新版
 function via(url){ return PROXY ? PROXY + encodeURIComponent(url) : url; }
 
 /* 设备号：东财接口按 deviceid 做频控。全站共用一个 "1" 很容易被别的
@@ -304,6 +359,12 @@ function dateStr(d){
   return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate());
 }
 function dayKey(){ return dateStr(); }
+function todayISO(d){
+  d = d || new Date();
+  const p = n => String(n).padStart(2, "0");
+  return d.getFullYear() + "-" + p(d.getMonth() + 1) + "-" + p(d.getDate());
+}
+function uid(){ return Date.now().toString(36) + Math.random().toString(36).slice(2, 6); }
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
 function esc(s){
   return String(s == null ? "" : s).replace(/[&<>"']/g, c =>
@@ -379,14 +440,33 @@ function openSheet(opt){
   box.innerHTML =
     '<div class="sheet-h"><b>' + esc(opt.title) + '</b><button class="x" type="button">✕</button></div>' +
     (opt.fields || []).map(function (f) {
-      return '<div class="fld" data-k="' + esc(f.key) + '">' +
-        "<label>" + esc(f.label) + "</label>" +
-        '<input type="' + (f.type || "text") + '"' +
+      const common = ' autocomplete="off" autocorrect="off" spellcheck="false"';
+      let ctrl;
+      if (f.tag === "textarea"){
+        ctrl = "<textarea" + common +
           ' inputmode="' + (f.num ? "decimal" : "text") + '"' +
-          ' autocomplete="off" autocorrect="off" spellcheck="false"' +
+          (f.maxlength ? ' maxlength="' + f.maxlength + '"' : "") +
+          ' placeholder="' + esc(f.ph || "") + '">' +
+          esc(f.value == null ? "" : String(f.value)) + "</textarea>";
+      } else if (f.options){
+        ctrl = "<select" + common + ">" + f.options.map(function (o) {
+          const val = (typeof o === "object") ? o.v : o;
+          const txt = (typeof o === "object") ? o.t : o;
+          return '<option value="' + esc(val) + '"' +
+            (String(f.value == null ? "" : f.value) === String(val) ? " selected" : "") +
+            ">" + esc(txt) + "</option>";
+        }).join("") + "</select>";
+      } else {
+        ctrl = '<input' + common +
+          ' type="' + (f.type || "text") + '"' +
+          ' inputmode="' + (f.num ? "decimal" : "text") + '"' +
           (f.maxlength ? ' maxlength="' + f.maxlength + '"' : "") +
           ' placeholder="' + esc(f.ph || "") + '"' +
-          ' value="' + esc(f.value == null ? "" : String(f.value)) + '" />' +
+          ' value="' + esc(f.value == null ? "" : String(f.value)) + '" />';
+      }
+      return '<div class="fld" data-k="' + esc(f.key) + '">' +
+        "<label>" + esc(f.label) + "</label>" + ctrl +
+        (f.hint ? '<div class="hint">' + esc(f.hint) + "</div>" : "") +
         '<div class="hit"></div></div>';
     }).join("") +
     '<button class="primary sheet-ok" type="button">' + esc(opt.okText || "确定") + "</button>";
@@ -396,9 +476,25 @@ function openSheet(opt){
   sheetCur = { mask: mask, box: box };
   requestAnimationFrame(function () { mask.classList.add("on"); box.classList.add("on"); });
 
-  function q(k){ return box.querySelector('.fld[data-k="' + k + '"] input'); }
+  function q(k){
+    const sel = '.fld[data-k="' + k + '"] ';
+    return box.querySelector(sel + "input") || box.querySelector(sel + "textarea") ||
+           box.querySelector(sel + "select");
+  }
   function hitOf(k){ return box.querySelector('.fld[data-k="' + k + '"] .hit'); }
   const okBtn = box.querySelector(".sheet-ok");
+
+  /* 多行输入显示字数，配合买入理由「不超过一百个字」的纪律 */
+  (opt.fields || []).forEach(function (f) {
+    if (f.tag !== "textarea" || !f.maxlength) return;
+    const el = q(f.key), hit = hitOf(f.key);
+    const upd = function () {
+      hit.className = "hit";
+      hit.textContent = (el.value || "").length + " / " + f.maxlength + " 字";
+    };
+    el.addEventListener("input", upd);
+    upd();
+  });
 
   let found = null;
   const lookupField = (opt.fields || []).filter(function (f) { return f.lookup; })[0];
@@ -1084,6 +1180,76 @@ function loadWatch(){
 }
 function saveWatch(v){ LS.set("gd_watch", v); }
 
+/* ============================================================
+   5b. 情绪历史 / 交易计划 / 盘后复盘（全部本地持久化）
+   ============================================================ */
+const K_HIST = "gd_emohist", K_PLANS = "gd_plans", K_REVIEWS = "gd_reviews";
+const HIST_DAYS = 60;
+
+function loadEmoHist(){
+  const v = LS.get(K_HIST, []);
+  return Array.isArray(v) ? v.filter(x => x && /^\d{8}$/.test(String(x.d))) : [];
+}
+/* 每个交易日只留一条快照；盘中反复刷新以最后一次为准（收盘后即为当日终值）。
+   用接口返回的 dataDate 作 key，周末打开不会误记成新的一天。 */
+function saveEmoSnap(emo, d){
+  if (!emo || emo.stage === "未判断" || emo.zt == null) return;
+  const day = String(d || dateStr()).replace(/\D/g, "").slice(0, 8);
+  if (day.length !== 8) return;
+  const snap = { d: day, zt: emo.zt, dt: emo.dt, zb: emo.zb,
+                 rate: emo.zbRate == null ? null : Math.round(emo.zbRate * 1000) / 1000,
+                 lb: emo.maxLb, stage: emo.stage };
+  let h = loadEmoHist().filter(x => x.d !== day);
+  h.push(snap);
+  h.sort((a, b) => a.d.localeCompare(b.d));
+  if (h.length > HIST_DAYS) h = h.slice(-HIST_DAYS);
+  LS.set(K_HIST, h);
+}
+/* 换设备导入备份时按日期合并，不用备份覆盖本机新记录 */
+function mergeEmoHist(arr){
+  if (!Array.isArray(arr) || !arr.length) return;
+  const map = {};
+  loadEmoHist().forEach(x => { map[x.d] = x; });
+  /* 本机已有同一天的记录就以本机为准，备份只补本机缺的日期 */
+  arr.forEach(x => { if (x && /^\d{8}$/.test(String(x.d)) && !map[x.d]) map[x.d] = x; });
+  LS.set(K_HIST, Object.keys(map).sort().slice(-HIST_DAYS).map(k => map[k]));
+}
+function loadPlans(){
+  const v = LS.get(K_PLANS, []);
+  return Array.isArray(v) ? v : [];
+}
+function savePlans(v){ LS.set(K_PLANS, v); }
+function loadReviews(){
+  const v = LS.get(K_REVIEWS, []);
+  return Array.isArray(v) ? v : [];
+}
+function saveReviews(v){ LS.set(K_REVIEWS, v); }
+
+/* 与桌面版 review.round_trip_cost() 同口径：
+   佣金万2.5×2 + 印花税万5 + 过户费万0.1×2 + 滑点千1×2 ≈ 0.302% */
+const ROUND_COST = 0.302;
+function reviewStats(rows){
+  if (!rows.length) return null;
+  const pnls = rows.filter(r => r.pnl != null && r.pnl !== "" && isFinite(Number(r.pnl)))
+                   .map(r => Number(r.pnl));
+  const out = { n: rows.length,
+                exec: Math.round(rows.filter(r => r.followed).length / rows.length * 100),
+                cost: ROUND_COST, count: pnls.length };
+  if (!pnls.length) return out;
+  const wins = pnls.filter(v => v > 0), losses = pnls.filter(v => v < 0);
+  const net = pnls.map(v => v - ROUND_COST);
+  out.win = Math.round(wins.length / pnls.length * 100);
+  out.netWin = Math.round(net.filter(v => v > 0).length / pnls.length * 100);
+  out.avg = pnls.reduce((a, b) => a + b, 0) / pnls.length;
+  out.netAvg = net.reduce((a, b) => a + b, 0) / net.length;
+  out.worst = Math.min.apply(null, pnls);
+  if (wins.length && losses.length){
+    out.ratio = (wins.reduce((a, b) => a + b, 0) / wins.length) /
+                Math.abs(losses.reduce((a, b) => a + b, 0) / losses.length);
+  }
+  return out;
+}
+
 const ST = {
   loading: false,
   emo: null,
@@ -1096,6 +1262,7 @@ const ST = {
   dataDate: "",
   warn: [],
   updatedAt: null,
+  planTab: "plan",
 };
 
 /* ============================================================
@@ -1160,6 +1327,9 @@ async function refreshAllInner(silent){
         ST.emo = { stage: "未判断", reasons: ["部分数据源失败，本轮不判阶段"], advice: "数据源异常，先观望",
                    zt: zt.count, dt: null, zb: null, maxLb, zbRate: null };
       }
+      /* 判出阶段就落一条当日快照，供「情绪轨迹」看多日演化；
+         数据源异常时不记，免得把残缺数据写进历史。 */
+      saveEmoSnap(ST.emo, ST.dataDate);
     }catch(e){
       warns.push("三池获取失败：" + e.message);
       ST.pools = null;
@@ -1406,6 +1576,8 @@ async function refreshAllInner(silent){
         code, name: w.name || code, isFund: w.kind === "fund" || (q && q.kind === "fund"),
         price: q ? q.price : null, pct: q ? q.pct : null, estY: e ? e.y : null,
         buy: Number(w.buy) || null, stop: Number(w.stop) || null,
+        take: Number(w.take) || null, upPct: Number(w.upPct) || null,
+        fromPlan: !!w.fromPlan,
         vsBuy: q && w.buy ? Math.round((q.price / w.buy - 1) * 1000) / 10 : null,
         vsStop: q && w.stop ? Math.round((q.price / w.stop - 1) * 1000) / 10 : null,
       });
@@ -1416,6 +1588,7 @@ async function refreshAllInner(silent){
   ST.warn = warns;
   ST.updatedAt = new Date();
   renderAll();
+  checkAlerts();
   if (!silent && warns.length) toast(warns[0]);
 }
 
@@ -1425,10 +1598,12 @@ async function refreshAllInner(silent){
 function renderAll(){
   renderHeader();
   renderAdvice();
+  renderTrend();
   renderMarket();
   renderEtf();
   renderPos();
   renderWatch();
+  renderPlan();
 }
 
 function renderHeader(){
@@ -1444,6 +1619,81 @@ function renderHeader(){
   }
   if (ST.warn.length) parts.push('<span class="tag warn">' + esc(ST.warn[0]) + "</span>");
   document.getElementById("hdSub").innerHTML = parts.join("") || "<span>正在加载…</span>";
+}
+
+/* ============================================================
+   7a. 情绪轨迹：周期看的是「变化」，不是当日绝对值。
+   同样涨停 50 家，修复期与退潮期含义相反，只看当天容易误判。
+   ============================================================ */
+const STAGE_ORDER = ["冰点", "修复", "发酵", "高潮", "退潮"];
+const STAGE_HINT = {
+  "冰点": "控制试错仓，等首个换手板确认再动手",
+  "修复": "轻仓试错，只做最先封板的主线",
+  "发酵": "可上仓位，但只做龙头与最强跟风",
+  "高潮": "高潮次日不接力，逐步兑现",
+  "退潮": "反弹即减仓，别把减仓拖成套牢",
+};
+
+function emoCompare(cur, prev){
+  if (!cur || !prev) return "";
+  const dz = (cur.zt != null && prev.zt != null) ? cur.zt - prev.zt : null;
+  const dl = (cur.lb != null && prev.lb != null) ? cur.lb - prev.lb : null;
+  const dr = (cur.rate != null && prev.rate != null) ? (cur.rate - prev.rate) * 100 : null;
+  const bits = [];
+  if (dz != null) bits.push("涨停 " + prev.zt + "→" + cur.zt + "（" + signed(dz, 0) + "）");
+  if (dl != null) bits.push("最高板 " + prev.lb + "→" + cur.lb);
+  if (dr != null) bits.push("炸板率 " + Math.round(prev.rate * 100) + "%→" + Math.round(cur.rate * 100) + "%");
+  if (!bits.length) return "";
+  /* 涨停/高度加分，炸板率上升减分；量纲调到「1 分≈一次明显变化」 */
+  const score = (dz == null ? 0 : dz / 8) + (dl == null ? 0 : dl * 1.6) - (dr == null ? 0 : dr / 6);
+  const word = score >= 1.2 ? '<b class="up">转强</b>'
+             : score <= -1.2 ? '<b class="dn">转弱</b>' : "<b>基本持平</b>";
+  return '<div class="trk-d">较上一交易日：' + esc(bits.join(" · ")) + " → " + word + "</div>";
+}
+
+function stageNote(cur, prev){
+  if (!cur) return "";
+  const s = cur.stage;
+  const hint = STAGE_HINT[s] || "按计划执行，不做计划外的交易";
+  const a = STAGE_ORDER.indexOf(prev && prev.stage), b = STAGE_ORDER.indexOf(s);
+  if (a >= 0 && b >= 0 && a !== b){
+    /* 情绪周期是环：冰点→…→退潮→冰点。按环形相邻判断，退潮→冰点是推进而不是回摆；
+       跨过中间阶段则叫跳变（如发酵直接退潮），比线性比大小准确。 */
+    const n = STAGE_ORDER.length;
+    const dir = (a + 1) % n === b ? "周期推进"
+              : (b + 1) % n === a ? "周期回摆" : "阶段跳变";
+    return '<div class="trk-n">阶段迁移 <b>' + esc(prev.stage) + " → " + esc(s) + "</b>（" +
+           dir + "）：" + esc(hint) + "</div>";
+  }
+  return '<div class="trk-n">阶段延续 <b>' + esc(s) + "</b>：" + esc(hint) + "</div>";
+}
+
+function renderTrend(){
+  const el = document.getElementById("trendCard");
+  if (!el) return;
+  const h = loadEmoHist();
+  const head = '<div class="card-h"><span class="card-t">情绪轨迹</span><span class="xs dim">' +
+               (h.length ? "已记 " + h.length + " 个交易日" : "自动记录中") + "</span></div>";
+  if (!h.length){
+    el.innerHTML = head + '<div class="empty">从今天起每个交易日自动记一条，第二个交易日起可看强弱对比</div>';
+    return;
+  }
+  const win = h.slice(-10);
+  const max = Math.max.apply(null, win.map(x => Number(x.zt) || 0).concat([1]));
+  const bars = win.map((x, i) => {
+    const v = Number(x.zt) || 0;
+    const hh = Math.max(2, Math.round(v / max * 54));
+    const last = i === win.length - 1;
+    return '<div class="trk-c"><div class="trk-v">' + (last ? v : "") + "</div>" +
+      '<div class="trk-b' + (last ? "" : " q") + '" style="height:' + hh + 'px"></div>' +
+      '<div class="trk-l">' + x.d.slice(4, 6) + "-" + x.d.slice(6, 8) + "</div></div>";
+  }).join("");
+  const cur = win[win.length - 1], prev = win.length > 1 ? win[win.length - 2] : null;
+  el.innerHTML = head +
+    '<div class="xs dim">柱高＝涨停家数（红为最近一日）· 近 ' + win.length + " 个交易日</div>" +
+    '<div class="trk' + (win.length < 6 ? " few" : "") + '">' + bars + "</div>" +
+    emoCompare(cur, prev) + stageNote(cur, prev) +
+    (win.length === 1 ? '<div class="trk-n">下一交易日再打开一次，就能看到与今日的强弱对比</div>' : "");
 }
 
 function bannerHtml(){
@@ -1561,6 +1811,14 @@ function buildRisks(){
     } else if (w.buy && w.price <= w.buy){
       out.push({ lv: "ok", t: "到达买价：" + w.name,
         m: "现价 " + fixed(w.price, 2) + " ≤ 计划买价 " + w.buy + "，可按计划买入" });
+    }
+    if (w.take && w.price >= w.take){
+      out.push({ lv: "ok", t: "到达目标价：" + w.name,
+        m: "现价 " + fixed(w.price, 2) + " ≥ 目标 " + w.take + "，按计划兑现，不临时改主意" });
+    }
+    if (w.upPct && w.pct != null && w.pct >= w.upPct){
+      out.push({ lv: "ok", t: "涨幅达标：" + w.name,
+        m: "今日 " + signed(w.pct, 2) + "% ≥ 设定 " + w.upPct + "%，检查是否要兑现" });
     }
   });
   return out;
@@ -1798,7 +2056,7 @@ function renderPos(){
       '<button id="btnExport">导出备份</button>' +
       '<button id="btnImport">导入备份</button>' +
     "</div>" +
-    '<div class="xs dim" style="margin-top:10px">数据只存在这台设备的浏览器里，不会上传。换设备请用导出/导入。</div>';
+    '<div class="xs dim" style="margin-top:10px">持仓 / 自选 / 盯盘 / 计划 / 复盘 / 情绪轨迹都只存在这台设备，不会上传。换设备请用导出 / 导入。</div>';
 
   document.getElementById("btnSetTotal").onclick = () => {
     const v = prompt("总资金（元）", total || "");
@@ -1842,7 +2100,8 @@ function renderPos(){
     };
   });
   document.getElementById("btnExport").onclick = () => {
-    const data = { portfolio: loadPortfolio(), etf: loadEtfWatch(), watch: loadWatch() };
+    const data = { portfolio: loadPortfolio(), etf: loadEtfWatch(), watch: loadWatch(),
+                   plans: loadPlans(), reviews: loadReviews(), emohist: loadEmoHist() };
     const txt = JSON.stringify(data, null, 1);
     navigator.clipboard.writeText(txt)
       .then(() => toast("已复制到剪贴板，粘贴到备忘录保存"))
@@ -1858,6 +2117,9 @@ function renderPos(){
       if (d.portfolio) LS.set("gd_portfolio", d.portfolio);
       if (Array.isArray(d.etf)) LS.set("gd_etf", d.etf);
       if (Array.isArray(d.watch)) LS.set("gd_watch", d.watch);
+      if (Array.isArray(d.plans)) LS.set("gd_plans", d.plans);
+      if (Array.isArray(d.reviews)) LS.set("gd_reviews", d.reviews);
+      mergeEmoHist(d.emohist);   // 情绪历史按日期合并，不用旧备份盖掉本机新记录
       refreshAll(true);
       toast("导入完成");
     }catch(e){ toast("格式不对，导入失败"); }
@@ -1872,10 +2134,14 @@ function renderWatch(){
       let flag = "";
       if (r.price != null && r.stop && r.price <= r.stop) flag = '<span class="tag up">破止损</span>';
       else if (r.price != null && r.buy && r.price <= r.buy) flag = '<span class="tag ok">到买价</span>';
+      else if (r.price != null && r.take && r.price >= r.take) flag = '<span class="tag ok">到目标价</span>';
+      else if (r.pct != null && r.upPct && r.pct >= r.upPct) flag = '<span class="tag up">涨幅达标</span>';
       return '<div class="li">' +
         '<div class="li-n"><b>' + esc(r.name) + "</b>" +
           '<span class="xs dim" style="margin-left:6px">' + esc(r.code) + "</span> " + flag +
           "<i>买 " + (r.buy || "-") + " · 损 " + (r.stop || "-") +
+          " · 目标 " + (r.take || "-") +
+          (r.upPct ? " · 涨幅 " + r.upPct + "%" : "") +
           (r.vsStop != null ? " · 距止损 " + signed(r.vsStop, 1) + "%" : "") + "</i></div>" +
         '<div class="li-v">' + fixed(r.price, r.isFund ? 4 : 2) +
           '<div class="xs ' + clsOf(r.estY != null ? r.estY : r.pct) + '">' +
@@ -1884,10 +2150,23 @@ function renderWatch(){
       "</div>";
     }).join("") + "</div>" : '<div class="empty">还没有盯盘股</div>');
 
+  const np = (typeof Notification === "undefined") ? "unsupported" : Notification.permission;
+  const noteTxt = np === "granted" ? "系统通知：已开启"
+                : np === "denied" ? "系统通知：被系统拒绝"
+                : np === "unsupported" ? "系统通知：此浏览器不支持"
+                : "系统通知：未开启";
   document.getElementById("watchAddCard").innerHTML =
     '<div class="card-h"><span class="card-t">添加盯盘股</span></div>' +
-    '<div class="xs dim">填了买价/止损价，页面会提示「到买价」「破止损」</div>' +
-    '<div style="margin-top:10px"><button id="btnAddWatch" class="primary">+ 添加</button></div>';
+    '<div class="xs dim">填了买价 / 止损 / 目标价，触发时页面内红条 + 声音 + 振动提醒</div>' +
+    '<div style="margin-top:10px"><button id="btnAddWatch" class="primary" style="width:100%">+ 添加</button></div>' +
+    '<div class="split"></div>' +
+    '<div class="row sp"><div class="xs dim">' + noteTxt +
+      '<br>仅在页面打开 / 切回前台时检查，锁屏后不刷新</div>' +
+      '<button class="mini" id="btnNotify">开启通知</button></div>' +
+    '<div class="xs dim" style="margin-top:6px">' + esc(VER) + "</div>";
+
+  const bn = document.getElementById("btnNotify");
+  if (bn) bn.onclick = askNotifyPermission;
 
   document.getElementById("btnAddWatch").onclick = () => {
     openSheet({
@@ -1897,15 +2176,20 @@ function renderWatch(){
         { key: "code", label: "代码（6 位，自动识别，场外基金也行）", ph: "600000", num: true, maxlength: 6, lookup: true },
         { key: "buy", label: "计划买价（可留空）", ph: "跌到这个价提醒", num: true },
         { key: "stop", label: "止损价（可留空）", ph: "跌破这个价提醒", num: true },
+        { key: "take", label: "目标价 / 止盈价（可留空）", ph: "涨到这个价提醒", num: true },
+        { key: "upPct", label: "日内涨幅提醒 %（可留空）", ph: "如 5 表示今天涨 5% 提醒", num: true },
       ],
       onSubmit: (v, found) => {
         const buy = Number(v.buy), stop = Number(v.stop);
+        const take = Number(v.take), upPct = Number(v.upPct);
         const list = loadWatch();
         if (list.some(x => String(x.code) === found.code)) return toast("已经在盯了");
         list.push({
-          code: found.code, name: found.name,
+          code: found.code, name: found.name, kind: found.kind || "stock",
           buy: isFinite(buy) && buy > 0 ? buy : null,
           stop: isFinite(stop) && stop > 0 ? stop : null,
+          take: isFinite(take) && take > 0 ? take : null,
+          upPct: isFinite(upPct) && upPct > 0 ? upPct : null,
         });
         saveWatch(list);
         closeSheet();
@@ -1924,17 +2208,352 @@ function renderWatch(){
 }
 
 /* ============================================================
+   7b. 计划 · 复盘：盘前写计划，盘中只执行，盘后算净账
+   ============================================================ */
+function renderPlan(){
+  const seg = document.getElementById("planSeg");
+  if (!seg) return;
+  const tab = ST.planTab || "plan";
+  seg.querySelectorAll("button").forEach(b => {
+    const on = b.getAttribute("data-pt") === tab;
+    b.classList.toggle("on", on);
+    b.onclick = () => { ST.planTab = b.getAttribute("data-pt"); renderPlan(); };
+  });
+  const box = document.getElementById("planCard");
+  const add = document.getElementById("planAddCard");
+  if (tab === "review") renderReviewList(box, add);
+  else if (tab === "stats") renderStatsCard(box, add);
+  else renderPlanList(box, add);
+}
+
+/* 计划里的价位自动同步到盯盘，省得两处重复录。
+   已经手动加过的盯盘股不覆盖，只在它是「由计划生成」时才更新。 */
+function syncPlanToWatch(p){
+  const w = loadWatch();
+  const i = w.findIndex(x => String(x.code) === String(p.code));
+  if (i < 0){
+    w.push({ code: p.code, name: p.name, kind: p.kind || "stock",
+             buy: Number(p.entry) || null, stop: Number(p.stop) || null,
+             take: Number(p.target) || null, upPct: null, fromPlan: true });
+    saveWatch(w);
+    return "已同步到盯盘";
+  }
+  if (!w[i].fromPlan) return "盯盘里已有这只，未覆盖你手填的价位";
+  w[i].buy = Number(p.entry) || null;
+  w[i].stop = Number(p.stop) || null;
+  w[i].take = Number(p.target) || null;
+  saveWatch(w);
+  return "已更新盯盘价位";
+}
+
+function renderPlanList(box, add){
+  const rows = loadPlans().slice().reverse();
+  const open = rows.filter(p => !p.done).length;
+  box.innerHTML =
+    '<div class="card-h"><span class="card-t">交易计划</span>' +
+      '<span class="xs dim">' + open + " 条进行中 / 共 " + rows.length + " 条</span></div>" +
+    (rows.length ? rows.map(p =>
+      '<div class="pi"><div class="pi-h"><b>' + esc(p.name || p.code) + "</b>" +
+        '<span class="xs dim">' + esc(p.code) + "</span>" +
+        '<span class="tag ' + (p.done ? "" : "info") + '">' + (p.done ? "已完成" : "进行中") + "</span></div>" +
+        (p.reason ? '<div class="pi-r">' + esc(p.reason) + "</div>" : "") +
+        '<div class="pi-m">买 ' + esc(p.entry || "—") + " · 止损 " + esc(p.stop || "—") +
+          " · 目标 " + esc(p.target || "—") + " · 仓位 " + esc(p.pos || "—") + "</div>" +
+        '<div class="pi-m">' + esc(p.at || "") + " · 价位自动同步「盯盘」</div>" +
+        '<div class="pi-b"><button class="mini" data-plan-done="' + esc(p.id) + '">' +
+          (p.done ? "恢复进行中" : "标记完成") + "</button>" +
+          '<button class="mini" data-plan-del="' + esc(p.id) + '">删</button></div></div>'
+    ).join("") : '<div class="empty">还没有计划。盘前写完，盘中只执行</div>');
+
+  add.innerHTML =
+    '<div class="card-h"><span class="card-t">新建计划</span></div>' +
+    '<div class="xs dim" style="margin-bottom:10px">买入理由限 100 字，没有止损位不给存；保存时把买价 / 止损 / 目标同步到盯盘股。</div>' +
+    '<button class="primary" id="btnAddPlan" style="width:100%">+ 写一条盘前计划</button>' +
+    '<div class="xs dim" style="margin-top:10px">' + esc(VER) + "</div>";
+
+  box.querySelectorAll("[data-plan-done]").forEach(b => {
+    b.onclick = () => {
+      const id = b.getAttribute("data-plan-done");
+      const list = loadPlans();
+      const p = list.find(x => x.id === id);
+      if (p){ p.done = !p.done; savePlans(list); renderPlan(); }
+    };
+  });
+  box.querySelectorAll("[data-plan-del]").forEach(b => {
+    b.onclick = () => {
+      const id = b.getAttribute("data-plan-del");
+      savePlans(loadPlans().filter(x => x.id !== id));
+      renderPlan();
+      toast("计划已删除");
+    };
+  });
+  document.getElementById("btnAddPlan").onclick = () => {
+    openSheet({
+      title: "盘前计划",
+      okText: "保存计划",
+      fields: [
+        { key: "code", label: "代码（6 位，自动识别）", ph: "600000", num: true, maxlength: 6, lookup: true },
+        { key: "reason", label: "买入理由（不超过 100 字）", tag: "textarea", maxlength: 100,
+          ph: "一句话说清：什么阶段、什么主线、为什么是它" },
+        { key: "entry", label: "计划买价（可留空）", ph: "跌到这个价买", num: true },
+        { key: "stop", label: "止损价（必填）", ph: "没有止损位不是计划", num: true },
+        { key: "target", label: "目标价 / 止盈价（可留空）", ph: "到这个价提醒", num: true },
+        { key: "pos", label: "计划仓位（可留空）", ph: "如 2 成 / 20%",
+          hint: "保存后自动加到「盯盘」，破止损 / 到目标会提醒" },
+      ],
+      onSubmit: (v, found) => {
+        const reason = (v.reason || "").trim();
+        if (reason.length > 100) return toast("买入理由超过 100 字，精简一下");
+        const stop = Number(v.stop);
+        if (!isFinite(stop) || stop <= 0) return toast("没有止损位的计划不是计划");
+        if (!reason) return toast("写一句买入理由，盘中才不会临时起意");
+        const p = { id: uid(), code: found.code, name: found.name, kind: found.kind || "stock",
+                    reason, entry: (v.entry || "").trim(), stop,
+                    target: (v.target || "").trim(), pos: (v.pos || "").trim(),
+                    done: false, at: todayISO() + " " + new Date().toTimeString().slice(0, 5) };
+        const list = loadPlans(); list.push(p); savePlans(list);
+        const msg = syncPlanToWatch(p);
+        closeSheet();
+        toast("计划已保存 · " + msg + "，盘中只执行");
+        renderPlan();          // 先立刻显示，不等网络刷新
+        refreshAll(true);
+      },
+    });
+  };
+}
+
+function renderReviewList(box, add){
+  const rows = loadReviews().slice().reverse();
+  box.innerHTML =
+    '<div class="card-h"><span class="card-t">盘后复盘</span>' +
+      '<span class="xs dim">共 ' + rows.length + " 条</span></div>" +
+    (rows.length ? rows.map(r =>
+      '<div class="pi"><div class="pi-h"><b>' + esc(r.date || "—") + "</b>" +
+        '<span class="tag ' + (r.followed ? "ok" : "warn") + '">' +
+          (r.followed ? "按计划" : "没执行计划") + "</span>" +
+        (r.mood ? '<span class="tag">' + esc(r.mood) + "</span>" : "") +
+        (r.pnl != null && r.pnl !== "" ? '<span class="tag ' +
+          (Number(r.pnl) > 0 ? "up" : "dn") + '">' + signed(Number(r.pnl), 2) + "%</span>" : "") +
+      "</div>" +
+      (r.trades ? '<div class="pi-r">' + esc(r.trades) + "</div>" : "") +
+      (r.lesson ? '<div class="pi-m">得失：' + esc(r.lesson) + "</div>" : "") +
+      '<div class="pi-b"><button class="mini" data-rev-del="' + esc(r.id) + '">删</button></div></div>'
+    ).join("") : '<div class="empty">还没写复盘。记下因果，比记盈亏有用</div>');
+
+  add.innerHTML =
+    '<div class="card-h"><span class="card-t">写一条复盘</span></div>' +
+    '<div class="xs dim" style="margin-bottom:10px">盈亏填毛收益百分数即可，统计页会自动扣掉约 ' +
+      ROUND_COST.toFixed(3) + "% 的往返成本。</div>" +
+    '<button class="primary" id="btnAddReview" style="width:100%">+ 记录今天</button>';
+
+  box.querySelectorAll("[data-rev-del]").forEach(b => {
+    b.onclick = () => {
+      const id = b.getAttribute("data-rev-del");
+      saveReviews(loadReviews().filter(x => x.id !== id));
+      renderPlan();
+      toast("复盘已删除");
+    };
+  });
+  document.getElementById("btnAddReview").onclick = () => {
+    openSheet({
+      title: "盘后复盘",
+      okText: "保存复盘",
+      fields: [
+        { key: "date", label: "日期", type: "date", value: todayISO() },
+        { key: "trades", label: "今天做了什么", tag: "textarea", maxlength: 200, ph: "买了什么、为什么、什么价位" },
+        { key: "followed", label: "是否执行了计划", options: [
+            { v: "1", t: "按计划执行" }, { v: "0", t: "没执行计划（临时起意）" } ], value: "1" },
+        { key: "pnl", label: "这笔盈亏 %（可留空）", ph: "如 3.2 或 -2.1", num: true },
+        { key: "mood", label: "当时情绪阶段", options: ["未判断", "冰点", "修复", "发酵", "高潮", "退潮"],
+          value: (ST.emo && ST.emo.stage) || "未判断" },
+        { key: "lesson", label: "得失 / 下次怎么改", tag: "textarea", maxlength: 200, ph: "赚在哪、亏在哪，写成一句能记住的话" },
+      ],
+      onSubmit: v => {
+        const pnl = (v.pnl || "").trim() === "" ? null : Number(v.pnl);
+        if (pnl != null && !isFinite(pnl)) return toast("盈亏请填数字，如 3.2 或 -2.1");
+        const r = { id: uid(), date: v.date || todayISO(), trades: (v.trades || "").trim(),
+                    followed: v.followed === "1", pnl, mood: v.mood,
+                    lesson: (v.lesson || "").trim(), at: new Date().toTimeString().slice(0, 5) };
+        const list = loadReviews(); list.push(r); saveReviews(list);
+        closeSheet();
+        toast(r.followed ? "复盘已保存" : "没执行计划就是输给人性，记下来");
+        renderPlan();
+      },
+    });
+  };
+}
+
+function renderStatsCard(box, add){
+  const s = reviewStats(loadReviews());
+  if (!s){
+    box.innerHTML = '<div class="card-h"><span class="card-t">复盘统计</span></div>' +
+      '<div class="empty">写几条复盘，这里会自动算胜率与盈亏比</div>';
+  } else {
+    const k = (v, t) => '<div class="kpi"><div class="kpi-v">' + v + '</div><div class="kpi-k">' + t + "</div></div>";
+    const has = s.count > 0;
+    box.innerHTML = '<div class="card-h"><span class="card-t">复盘统计</span>' +
+        '<span class="xs dim">' + s.n + " 条复盘</span></div>" +
+      '<div class="stat">' +
+        k(s.exec + "%", "计划执行率") +
+        k(s.count + " / " + s.n, "有盈亏记录") +
+        (has ? k(s.win + "%", "毛胜率") + k('<span class="dn">' + s.netWin + "%</span>", "净胜率") : "") +
+        (has ? k(signed(s.avg, 2) + "%", "毛平均") +
+               k('<span class="' + clsOf(s.netAvg) + '">' + signed(s.netAvg, 2) + "%</span>", "净平均") : "") +
+        (has ? k(s.ratio == null ? "—" : fixed(s.ratio, 2), "盈亏比") +
+               k('<span class="dn">' + signed(s.worst, 2) + "%</span>", "单次最大亏损") : "") +
+      "</div>" +
+      '<div class="xs dim" style="margin-top:10px">净口径 = 每笔毛收益 − ' + s.cost.toFixed(3) +
+        "% 往返成本（佣金 + 印花税 + 过户费 + 滑点）</div>" +
+      (has && s.avg > 0 && s.netAvg <= 0
+        ? '<div class="risk hi" style="margin-top:10px"><b>平均看着赚，扣掉成本其实是亏的</b>' +
+          "<p>提高单笔盈亏比，或者少做小波动的频繁交易</p></div>" : "") +
+      (!has ? '<div class="xs dim" style="margin-top:6px">复盘时填了「盈亏 %」才会算胜率</div>' : "");
+  }
+  add.innerHTML = '<div class="card-h"><span class="card-t">口径说明</span></div>' +
+    '<div class="xs dim" style="line-height:1.65">手填的盈亏是毛收益，不含费用。默认按佣金万 2.5（双向）、' +
+    "印花税万 5（卖出）、过户费万 0.1（双向）、滑点千 1（双向）估算，合计约 " +
+    ROUND_COST.toFixed(3) + "%。小资金还有最低佣金 5 元/笔，实际成本会更高。</div>";
+}
+
+/* ============================================================
+   7c. 手机端主动提醒：只在状态「刚触发」时响一次
+   ============================================================ */
+let ALERT_SESSION = false;   // 本会话是否已做过开场检查
+let audioCtx = null;
+const K_ALERT = "gd_alert_state";
+
+/* 首次触摸/点击时预热音频上下文（iOS 要求用户手势后才能出声） */
+function primeAudio(){
+  try{
+    const AC = window.AudioContext || window.webkitAudioContext;
+    if (!AC) return;
+    if (!audioCtx) audioCtx = new AC();
+    if (audioCtx.state === "suspended") audioCtx.resume().catch(() => {});
+  }catch(e){}
+}
+document.addEventListener("touchstart", primeAudio, { once: true, passive: true });
+document.addEventListener("click", primeAudio, { once: true });
+
+function beep(){
+  try{
+    if (!audioCtx || audioCtx.state !== "running") return;
+    const t0 = audioCtx.currentTime;
+    [0, 0.18].forEach(off => {
+      const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+      o.type = "sine"; o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, t0 + off);
+      g.gain.exponentialRampToValueAtTime(0.16, t0 + off + 0.02);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + off + 0.13);
+      o.connect(g); g.connect(audioCtx.destination);
+      o.start(t0 + off); o.stop(t0 + off + 0.14);
+    });
+  }catch(e){}
+}
+
+function currentAlertFlags(){
+  const f = {};
+  (ST.live ? ST.live.holdings : []).forEach(h => {
+    if (h.pnl != null && h.pnl <= STOP_LOSS){
+      f["pos:" + h.code] = { lv: "hi", t: "止损：" + h.name,
+        m: "亏损 " + fixed(h.pnl, 1) + "%，已破 " + STOP_LOSS + "% 止损线" };
+    }
+  });
+  ST.watch.forEach(w => {
+    if (w.price == null) return;
+    if (w.stop && w.price <= w.stop)
+      f["stop:" + w.code] = { lv: "hi", t: "破止损：" + w.name,
+        m: "现价 " + fixed(w.price, 2) + " ≤ 止损 " + w.stop };
+    if (w.buy && w.price <= w.buy && !f["stop:" + w.code])
+      f["buy:" + w.code] = { lv: "ok", t: "到买价：" + w.name,
+        m: "现价 " + fixed(w.price, 2) + " ≤ 计划买价 " + w.buy };
+    if (w.take && w.price >= w.take)
+      f["take:" + w.code] = { lv: "ok", t: "到目标价：" + w.name,
+        m: "现价 " + fixed(w.price, 2) + " ≥ 目标 " + w.take + "，按计划兑现" };
+    if (w.upPct && w.pct != null && w.pct >= w.upPct)
+      f["up:" + w.code] = { lv: "ok", t: "涨幅达标：" + w.name,
+        m: "今日 " + signed(w.pct, 2) + "% ≥ 设定 " + w.upPct + "%" };
+  });
+  return f;
+}
+
+function checkAlerts(){
+  const now = currentAlertFlags();
+  const prev = LS.get(K_ALERT, {});
+  const fresh = [];
+  Object.keys(now).forEach(k => {
+    /* 高危（破止损、持仓亏破线）每次打开页面都提醒一次，避免「启动时已破、之后永不提醒」；
+       其余只在状态由无到有时提醒。ALERT_SESSION 保证同一会话内不反复响。 */
+    if (!prev[k] || (!ALERT_SESSION && now[k].lv === "hi")) fresh.push(now[k]);
+  });
+  ALERT_SESSION = true;
+  const st = {};
+  Object.keys(now).forEach(k => { st[k] = 1; });
+  LS.set(K_ALERT, st);
+  if (fresh.length) fireAlerts(fresh);
+}
+
+function fireAlerts(list){
+  const hi = list.some(x => x.lv === "hi");
+  const bar = document.getElementById("alertBar");
+  if (bar){
+    bar.innerHTML = '<b>' + (hi ? "⚠ 纪律提醒" : "行情提醒") + "</b> · " +
+      esc(list[0].t) + "：" + esc(list[0].m) +
+      (list.length > 1 ? "　等 " + list.length + " 条" : "") +
+      '<span class="xs dim"> 点开看全部</span>';
+    bar.classList.add("on");
+    bar.onclick = () => {
+      bar.classList.remove("on");
+      goView("advice");
+      const c = document.getElementById("riskCard");
+      if (c) c.scrollIntoView({ behavior: "smooth", block: "center" });
+      renderAll();
+    };
+  }
+  beep();
+  try{ if (navigator.vibrate) navigator.vibrate(hi ? [140, 70, 140] : 90); }catch(e){}
+  sendNotify(list, hi);
+}
+
+function sendNotify(list, hi){
+  try{
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    const body = list.slice(0, 3).map(x => x.t + "：" + x.m).join("\n");
+    const opt = { body, tag: "guanchao-alert", renotify: true,
+                  icon: "./icons/icon-192.png", badge: "./icons/icon-192.png" };
+    if (navigator.serviceWorker && navigator.serviceWorker.ready){
+      navigator.serviceWorker.ready
+        .then(reg => reg.showNotification(hi ? "观潮 · 纪律提醒" : "观潮 · 行情提醒", opt))
+        .catch(() => { try{ new Notification("观潮 · 行情提醒", opt); }catch(_){} });
+    } else {
+      new Notification(hi ? "观潮 · 纪律提醒" : "观潮 · 行情提醒", opt);
+    }
+  }catch(e){}
+}
+
+function askNotifyPermission(){
+  if (typeof Notification === "undefined") return toast("这个浏览器不支持系统通知，页面内提醒仍可用");
+  if (Notification.permission === "granted") return toast("系统通知已开启");
+  if (Notification.permission === "denied") return toast("通知被系统拒绝了，可在浏览器设置里改回来");
+  primeAudio();
+  Notification.requestPermission().then(p => {
+    toast(p === "granted" ? "已开启系统通知" : "没开启，页面内提醒仍可用");
+    renderWatch();
+  }).catch(() => toast("没能申请到通知权限"));
+}
+
+/* ============================================================
    8. 交互
    ============================================================ */
+function goView(go){
+  document.querySelectorAll("#nav button").forEach(b =>
+    b.classList.toggle("on", b.getAttribute("data-go") === go));
+  document.querySelectorAll(".view").forEach(v => {
+    v.hidden = v.getAttribute("data-view") !== go;
+  });
+  window.scrollTo({ top: 0 });
+}
 document.querySelectorAll("#nav button").forEach(btn => {
-  btn.onclick = () => {
-    document.querySelectorAll("#nav button").forEach(b => b.classList.toggle("on", b === btn));
-    const go = btn.getAttribute("data-go");
-    document.querySelectorAll(".view").forEach(v => {
-      v.hidden = v.getAttribute("data-view") !== go;
-    });
-    window.scrollTo({ top: 0 });
-  };
+  btn.onclick = () => goView(btn.getAttribute("data-go"));
 });
 
 document.getElementById("btnRefresh").onclick = () => refreshAll(false).catch(e => toast("刷新失败：" + e.message));
